@@ -20,6 +20,7 @@
      15. Result Box
      16. Spinner
      17. Footer
+     18. Media Queries (Responsive)
    ============================================================ */
 
 /* Google Fonts — loaded once, used via CSS variables below.
@@ -58,11 +59,35 @@
     --font-serif: 'Playfair Display', serif;
     --font-sans:  'Source Sans 3', sans-serif;
     --font-mono:  'IBM Plex Mono', monospace;
+    
+    /* Transitions */
+    --transition-fast: 0.15s ease;
+    --transition-normal: 0.2s ease;
+    --transition-smooth: 0.5s ease;
+}
+
+/* Dark mode support (optional) */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --white: #1F2937;
+        --ink: #F3F4F6;
+        --muted: #9CA3AF;
+        --border: rgba(255, 255, 255, 0.1);
+    }
 }
 
 
 /* ── 2. BASE / RESET ─────────────────────────────────────────────
-   Remove browser default margin/padding, set the base font and color. */
+   Remove browser default margin/padding, set the base font and color.
+   Normalize across all browsers. */
+* {
+    box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
 body {
     margin: 0;
     padding: 0;
@@ -70,6 +95,15 @@ body {
     background: #F0F2F5;
     color: var(--ink);
     line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Accessibility: high contrast mode support */
+@media (prefers-contrast: more) {
+    body {
+        background: #ffffff;
+    }
 }
 
 
@@ -82,9 +116,11 @@ body {
     position: sticky;
     top: 0;
     z-index: 100;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
+
 .topbar-inner {
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 0.75rem 1.5rem;
     display: flex;
@@ -93,27 +129,63 @@ body {
 }
 
 /* Brand — logo badge + name + subtitle */
-.brand { display: flex; align-items: center; gap: 0.85rem; }
+.brand { 
+    display: flex; 
+    align-items: center; 
+    gap: 0.85rem;
+    flex: 1;
+}
+
 .brand-badge {
-    width: 36px; height: 36px;
+    width: 36px;
+    height: 36px;
     background: var(--gold);
     border-radius: 6px;
-    display: flex; align-items: center; justify-content: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-size: 1.1rem;
     flex-shrink: 0;
 }
-.brand h1 { font-family: var(--font-serif); font-size: 1rem; color: #fff; margin: 0; }
-.brand p  { font-size: 0.65rem; color: var(--gold); margin: 0; opacity: 0.8; }
+
+.brand h1 { 
+    font-family: var(--font-serif); 
+    font-size: 1rem; 
+    color: #fff; 
+    margin: 0; 
+    font-weight: 700;
+}
+
+.brand p  { 
+    font-size: 0.65rem; 
+    color: var(--gold); 
+    margin: 0; 
+    opacity: 0.8;
+}
 
 /* Right side — status indicator + lock button */
-.topbar-right { color: #fff; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; }
+.topbar-right { 
+    color: #fff; 
+    font-size: 0.85rem; 
+    display: flex; 
+    align-items: center; 
+    gap: 0.5rem;
+    white-space: nowrap;
+}
 
 /* Animated green dot — "engine online" indicator */
 .status-dot {
-    width: 8px; height: 8px;
+    width: 8px;
+    height: 8px;
     background: #22C55E;
     border-radius: 50%;
-    box-shadow: 0 0 8px #22C55E;  /* glow effect */
+    box-shadow: 0 0 8px #22C55E;
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
 }
 
 /* Lock Engine button — styled to match the topbar, not a full button */
@@ -128,9 +200,28 @@ body {
     font-size: 0.75rem;
     font-family: inherit;
     cursor: pointer;
-    transition: opacity 0.2s, background 0.2s;
+    transition: opacity var(--transition-fast), background var(--transition-fast);
 }
-.logout-link:hover { opacity: 1; background: rgba(255, 255, 255, 0.1); }
+
+.logout-link:hover { 
+    opacity: 1; 
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.logout-link:active {
+    transform: scale(0.98);
+}
+
+.logout-link:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Focus visible for accessibility */
+.logout-link:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.5);
+    outline-offset: 2px;
+}
 
 
 /* ── 4. LAYOUT ───────────────────────────────────────────────────
@@ -138,14 +229,23 @@ body {
    max-width centers the content on wide screens. */
 .layout {
     display: flex;
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 1.5rem auto;
     gap: 1.5rem;
     padding: 0 1.5rem;
     min-height: 80vh;
 }
-.sidebar      { width: 260px; flex-shrink: 0; }
-.main-content { flex-grow: 1; min-width: 0; }
+
+.sidebar { 
+    width: 260px; 
+    flex-shrink: 0;
+}
+
+.main-content { 
+    flex-grow: 1; 
+    min-width: 0;
+}
+
 /* min-width:0 prevents flex children from overflowing on narrow screens */
 
 
@@ -178,13 +278,31 @@ body {
     text-decoration: none;
     margin-bottom: 0.25rem;
     box-sizing: border-box;
-    transition: background 0.2s;
+    transition: background var(--transition-fast);
 }
-.nav-item:hover  { background: rgba(0, 33, 102, 0.05); }
-.nav-item.active { background: var(--navy-mid); color: #fff; }
+
+.nav-item:hover { 
+    background: rgba(0, 33, 102, 0.05);
+}
+
+.nav-item.active { 
+    background: var(--navy-mid); 
+    color: #fff;
+    font-weight: 600;
+}
+
+/* Focus visible for accessibility */
+.nav-item:focus-visible {
+    outline: 2px solid var(--navy-mid);
+    outline-offset: 2px;
+}
 
 /* Icon inside each nav item */
-.nav-icon { margin-right: 12px; font-size: 1.1rem; }
+.nav-icon { 
+    margin-right: 12px; 
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
 
 
 /* ── 6. PANELS ───────────────────────────────────────────────────
@@ -195,9 +313,24 @@ body {
     border-radius: 12px;
     border: 1px solid var(--border);
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-    display: none;  /* hidden by default */
+    display: none;
+    animation: slideIn 0.3s ease;
 }
-.panel.active { display: block; }  /* shown when JS adds "active" */
+
+.panel.active { 
+    display: block;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
 
 .panel-header {
     padding: 1.5rem;
@@ -206,15 +339,36 @@ body {
     align-items: center;
     gap: 1rem;
 }
-.panel-icon     { font-size: 1.8rem; }
-.panel-title    { font-family: var(--font-serif); font-size: 1.25rem; color: var(--navy-mid); font-weight: 700; }
-.panel-subtitle { font-size: 0.85rem; color: var(--muted); }
-.panel-body     { padding: 1.5rem; }
+
+.panel-icon { 
+    font-size: 1.8rem;
+    flex-shrink: 0;
+}
+
+.panel-title { 
+    font-family: var(--font-serif); 
+    font-size: 1.25rem; 
+    color: var(--navy-mid); 
+    font-weight: 700;
+}
+
+.panel-subtitle { 
+    font-size: 0.85rem; 
+    color: var(--muted);
+}
+
+.panel-body { 
+    padding: 1.5rem;
+}
 
 
 /* ── 7. TABLES & LEDGER ──────────────────────────────────────────
    Used in the Local Ledger panel. */
-table { width: 100%; border-collapse: collapse; }
+table { 
+    width: 100%; 
+    border-collapse: collapse;
+}
+
 th {
     text-align: left;
     padding: 1rem;
@@ -224,11 +378,17 @@ th {
     letter-spacing: 0.05em;
     color: var(--muted);
     border-bottom: 1px solid var(--border);
+    font-weight: 600;
 }
+
 td {
     padding: 1rem;
     border-bottom: 1px solid var(--border);
     font-size: 0.85rem;
+}
+
+tr:hover {
+    background: rgba(0, 33, 102, 0.02);
 }
 
 /* Footer bar below the table — holds the record count and pagination buttons. */
@@ -240,20 +400,41 @@ td {
     font-size: 0.8rem;
     color: var(--muted);
     border-top: 1px solid var(--border);
+    background: #F9FAFB;
+    border-radius: 0 0 12px 12px;
 }
+
 .page-btn {
     padding: 0.35rem 0.75rem;
     font-size: 0.78rem;
     font-family: inherit;
+    font-weight: 500;
     border: 1px solid var(--border);
     background: #fff;
     border-radius: 6px;
     cursor: pointer;
     color: var(--navy-mid);
-    transition: background 0.15s;
+    transition: background var(--transition-fast), color var(--transition-fast);
 }
-.page-btn:hover:not(:disabled) { background: var(--gold-pale); }
-.page-btn:disabled { opacity: 0.4; cursor: default; }
+
+.page-btn:hover:not(:disabled) { 
+    background: var(--gold-pale);
+    border-color: var(--gold);
+}
+
+.page-btn:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+.page-btn:disabled { 
+    opacity: 0.4; 
+    cursor: not-allowed;
+}
+
+.page-btn:focus-visible {
+    outline: 2px solid var(--navy-mid);
+    outline-offset: 2px;
+}
 
 /* Monospace hash/ID display — used in table cells */
 .mono {
@@ -262,6 +443,7 @@ td {
     padding: 2px 6px;
     border-radius: 4px;
     font-size: 0.75rem;
+    color: var(--navy-mid);
 }
 
 /* Document type badge — used in table cells */
@@ -272,6 +454,7 @@ td {
     border-radius: 12px;
     font-size: 0.7rem;
     font-weight: 600;
+    display: inline-block;
 }
 
 /* Verify link in ledger table */
@@ -285,9 +468,19 @@ td {
     font-size: 0.75rem;
     font-weight: 600;
     text-decoration: none;
-    transition: background 0.15s;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    cursor: pointer;
 }
-.btn-outline:hover { background: var(--gold-pale); }
+
+.btn-outline:hover { 
+    background: var(--gold-pale);
+    border-color: var(--gold);
+}
+
+.btn-outline:focus-visible {
+    outline: 2px solid var(--navy-mid);
+    outline-offset: 2px;
+}
 
 
 /* ── 8. DASHBOARD STATS ──────────────────────────────────────────
@@ -298,14 +491,24 @@ td {
     gap: 1rem;
     margin-bottom: 1.25rem;
 }
+
 .stat-card {
     background: #F9FAFB;
     border: 1px solid var(--border);
-    border-top: 3px solid var(--navy-mid);  /* colored top accent */
+    border-top: 4px solid var(--navy-mid);
     border-radius: 10px;
     padding: 1rem 1.25rem;
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
 }
-.stat-card--gold { border-top-color: var(--gold); }  /* variant for "Last Issue" */
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 33, 102, 0.1);
+}
+
+.stat-card--gold { 
+    border-top-color: var(--gold);
+}
 
 .stat-value {
     font-family: var(--font-serif);
@@ -314,7 +517,10 @@ td {
     color: var(--navy-mid);
     line-height: 1.1;
 }
-.stat-value--green { color: var(--green); }  /* for the ✓ immudb status */
+
+.stat-value--green { 
+    color: var(--green);
+}
 
 .stat-label {
     font-size: 0.72rem;
@@ -322,6 +528,7 @@ td {
     letter-spacing: 0.05em;
     color: var(--muted);
     margin-top: 0.25rem;
+    font-weight: 600;
 }
 
 
@@ -329,12 +536,13 @@ td {
    Gold left-border block used for descriptive text inside panels.
    The section ID (e.g. "01 — Upload") is a visual label only. */
 .civic-section {
-    border-left: 3px solid var(--gold);
+    border-left: 4px solid var(--gold);
     padding: 0.75rem 1rem;
     background: #FAFAF7;
     border-radius: 0 8px 8px 0;
     margin-bottom: 1.25rem;
 }
+
 .civic-section-id {
     font-size: 0.65rem;
     text-transform: uppercase;
@@ -344,36 +552,64 @@ td {
     display: block;
     margin-bottom: 0.35rem;
 }
-.civic-body     { font-size: 0.88rem; color: var(--muted); }
-.civic-body--sm { font-size: 0.83rem; }  /* slightly smaller for dense panels */
-.civic-body p   { margin: 0; }
+
+.civic-body { 
+    font-size: 0.88rem; 
+    color: var(--muted);
+}
+
+.civic-body--sm { 
+    font-size: 0.83rem;
+}
+
+.civic-body p { 
+    margin: 0;
+}
+
+.civic-body em {
+    font-style: italic;
+    color: var(--navy-mid);
+    font-weight: 500;
+}
 
 
 /* ── 10. ALERTS ──────────────────────────────────────────────────
    Warning and info banners in the Dashboard panel. */
-.alert-group { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1.25rem; }
+.alert-group { 
+    display: flex; 
+    flex-direction: column; 
+    gap: 0.65rem; 
+    margin-top: 1.25rem;
+}
 
 .alert {
     padding: 0.75rem 1rem;
     border-radius: 8px;
     font-size: 0.83rem;
     line-height: 1.5;
+    border-left: 4px solid;
 }
+
 .alert-warning {
     background: #FFFBEB;
-    border: 1px solid #FDE68A;
+    border-color: #FDE68A;
+    border-left-color: #F59E0B;
     color: #92400E;
 }
+
 .alert-info {
     background: var(--blue-pale);
-    border: 1px solid #BFDBFE;
+    border-color: #BFDBFE;
+    border-left-color: #3B82F6;
     color: #1E3A8A;
 }
 
 
 /* ── 11. FORMS & INPUTS ──────────────────────────────────────────
    Used in the upload form. */
-.form-group { margin-bottom: 1.25rem; }
+.form-group { 
+    margin-bottom: 1.25rem;
+}
 
 .form-label {
     display: block;
@@ -401,15 +637,31 @@ td {
     font-size: 0.9rem;
     box-sizing: border-box;
     background: #fff;
-    transition: border-color 0.2s;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
+
 .form-select:focus,
 .form-input:focus,
 .form-textarea:focus {
     outline: none;
-    border-color: var(--navy-mid);  /* highlight on focus */
+    border-color: var(--navy-mid);
+    box-shadow: 0 0 0 3px rgba(0, 33, 102, 0.1);
 }
-.form-textarea { min-height: 140px; resize: vertical; }
+
+.form-textarea { 
+    min-height: 140px; 
+    resize: vertical;
+}
+
+/* Select dropdown arrow styling */
+.form-select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23003366'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 14l-7 7m0 0l-7-7m7 7V3'%3E%3C/path%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1.2em;
+    padding-right: 2.5rem;
+}
 
 
 /* ── 12. BUTTONS ───────────────────────────────────────────────── */
@@ -427,11 +679,28 @@ td {
     font-size: 0.9rem;
     cursor: pointer;
     margin-top: 0.5rem;
-    transition: background 0.2s;
+    transition: background var(--transition-normal), transform var(--transition-fast);
 }
-.btn-submit:hover    { background: var(--navy); }
-.btn-submit:disabled { opacity: 0.6; cursor: not-allowed; }
-/* disabled state — set by portal.js to prevent duplicate submissions */
+
+.btn-submit:hover { 
+    background: var(--navy);
+    transform: translateY(-1px);
+}
+
+.btn-submit:active {
+    transform: translateY(0);
+}
+
+.btn-submit:disabled { 
+    opacity: 0.6; 
+    cursor: not-allowed;
+    transform: none;
+}
+
+.btn-submit:focus-visible {
+    outline: 2px solid var(--navy-mid);
+    outline-offset: 2px;
+}
 
 
 /* ── 13. FILE DROP ZONE ──────────────────────────────────────────
@@ -443,18 +712,35 @@ td {
     padding: 2rem;
     text-align: center;
     cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
+    transition: border-color var(--transition-normal), background var(--transition-normal);
 }
-.file-drop:hover  { border-color: var(--navy-mid); }
+
+.file-drop:hover { 
+    border-color: var(--navy-mid);
+}
+
+.file-drop:focus-visible {
+    outline: 2px solid var(--navy-mid);
+    outline-offset: 2px;
+}
 
 /* dragover class added/removed by portal.js during drag events */
 .file-drop.dragover {
     border-color: var(--navy-mid);
     background: rgba(0, 33, 102, 0.02);
+    border-width: 2px;
 }
 
-.file-drop-icon { font-size: 2rem; margin-bottom: 0.5rem; }
-.file-drop-hint { margin-top: 0.2rem; font-size: 0.75rem; color: var(--muted); }
+.file-drop-icon { 
+    font-size: 2rem; 
+    margin-bottom: 0.5rem;
+}
+
+.file-drop-hint { 
+    margin-top: 0.2rem; 
+    font-size: 0.75rem; 
+    color: var(--muted);
+}
 
 /* Badge shown after a file is selected — displays filename + size */
 .file-name-badge {
@@ -466,16 +752,24 @@ td {
     border-radius: 4px;
     font-family: var(--font-mono);
     font-size: 0.78rem;
+    font-weight: 600;
 }
 
 
 /* ── 14. PROGRESS INDICATOR ──────────────────────────────────────
    Shows animated steps while Flask processes the upload.
    Hidden by default — portal.js shows it on form submit. */
-.progress-wrap { display: none; margin-top: 1.25rem; }
+.progress-wrap { 
+    display: none; 
+    margin-top: 1.25rem;
+}
 
 /* Row of step pills */
-.progress-steps { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+.progress-steps { 
+    display: flex; 
+    gap: 0.5rem; 
+    margin-bottom: 0.75rem;
+}
 
 .progress-step {
     flex: 1;
@@ -487,14 +781,16 @@ td {
     background: #F1F5F9;
     color: var(--muted);
     border: 1.5px solid var(--border);
-    transition: background 0.25s, color 0.25s, border-color 0.25s;
+    transition: background var(--transition-normal), color var(--transition-normal), border-color var(--transition-normal);
 }
+
 /* Current step — highlighted in navy */
 .progress-step.active {
     background: var(--navy-mid);
     color: #fff;
     border-color: var(--navy-mid);
 }
+
 /* Completed steps — green */
 .progress-step.done {
     background: var(--green-pale);
@@ -509,12 +805,13 @@ td {
     border-radius: 99px;
     overflow: hidden;
 }
+
 .progress-bar {
     height: 100%;
     width: 0%;
     background: var(--navy-mid);
     border-radius: 99px;
-    transition: width 0.5s ease;  /* smooth fill animation */
+    transition: width var(--transition-smooth);
 }
 
 
@@ -527,16 +824,41 @@ td {
     border-radius: 10px;
     overflow: hidden;
     border: 1.5px solid var(--border);
+    animation: slideIn 0.3s ease;
 }
-.result-success { border-color: #86EFAC; }  /* green border on success */
-.result-error   { border-color: #FCA5A5; }  /* red border on error */
 
-.result-header { padding: 0.85rem 1rem; background: #F9FAFB; border-bottom: 1px solid var(--border); }
-.result-header h4 { margin: 0; font-size: 0.9rem; font-weight: 700; color: var(--navy-mid); }
-.result-success .result-header { background: var(--green-pale); }
-.result-error   .result-header { background: var(--red-pale); }
+.result-success { 
+    border-color: #86EFAC;
+}
 
-.result-body { padding: 1rem; }
+.result-error { 
+    border-color: #FCA5A5;
+}
+
+.result-header { 
+    padding: 0.85rem 1rem; 
+    background: #F9FAFB; 
+    border-bottom: 1px solid var(--border);
+}
+
+.result-header h4 { 
+    margin: 0; 
+    font-size: 0.9rem; 
+    font-weight: 700; 
+    color: var(--navy-mid);
+}
+
+.result-success .result-header { 
+    background: var(--green-pale);
+}
+
+.result-error .result-header { 
+    background: var(--red-pale);
+}
+
+.result-body { 
+    padding: 1rem;
+}
 
 /* Key/value grid for success details (File, Type, Status) */
 .result-kv {
@@ -546,8 +868,17 @@ td {
     font-size: 0.83rem;
     align-items: baseline;
 }
-.result-key { font-weight: 700; color: var(--muted); white-space: nowrap; }
-.result-val { color: var(--ink); word-break: break-all; }
+
+.result-key { 
+    font-weight: 700; 
+    color: var(--muted); 
+    white-space: nowrap;
+}
+
+.result-val { 
+    color: var(--ink); 
+    word-break: break-all;
+}
 
 /* Download button — appears inside the result box on success.
    Uses createObjectURL blob — not a server URL. */
@@ -558,21 +889,35 @@ td {
     background: var(--navy-mid);
     color: #fff;
     border-radius: 8px;
+    border: none;
     text-decoration: none;
     font-size: 0.83rem;
     font-weight: 600;
-    transition: background 0.2s;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background var(--transition-normal);
 }
-.download-btn:hover { background: var(--navy); }
+
+.download-btn:hover { 
+    background: var(--navy);
+}
+
+.download-btn:focus-visible {
+    outline: 2px solid var(--navy-mid);
+    outline-offset: 2px;
+}
 
 
 /* ── 16. SPINNER ─────────────────────────────────────────────────
    CSS-only loading animation — no JS, no images.
    Used in the ledger loading state. */
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin { 
+    to { transform: rotate(360deg); } 
+}
 
 .spinner {
-    width: 24px; height: 24px;
+    width: 24px;
+    height: 24px;
     border: 3px solid var(--border);
     border-top-color: var(--navy-mid);
     border-radius: 50%;
@@ -591,4 +936,147 @@ td {
     color: var(--muted);
     border-top: 1px solid var(--border);
     margin-top: 2rem;
+    background: #FAFAF7;
+}
+
+
+/* ── 18. MEDIA QUERIES (RESPONSIVE) ──────────────────────────────
+   Mobile-first: base styles are mobile, media queries add desktop. */
+
+/* Tablet: 768px+ */
+@media (max-width: 1024px) {
+    .layout {
+        flex-direction: column;
+    }
+
+    .sidebar {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 0.5rem;
+    }
+
+    .sidebar-section {
+        grid-column: 1 / -1;
+    }
+}
+
+/* Mobile: 480px and down */
+@media (max-width: 640px) {
+    .topbar-inner {
+        flex-wrap: wrap;
+        gap: 1rem;
+    }
+
+    .brand h1 {
+        font-size: 0.9rem;
+    }
+
+    .brand p {
+        font-size: 0.6rem;
+    }
+
+    .topbar-right {
+        font-size: 0.75rem;
+        gap: 0.3rem;
+    }
+
+    .logout-link {
+        padding: 3px 8px;
+        font-size: 0.65rem;
+    }
+
+    .layout {
+        margin: 1rem;
+        gap: 1rem;
+        padding: 0;
+    }
+
+    .sidebar {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        order: 2;
+    }
+
+    .main-content {
+        order: 1;
+    }
+
+    .panel-header {
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 1rem;
+    }
+
+    .panel-body {
+        padding: 1rem;
+    }
+
+    .stats-row {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.75rem;
+    }
+
+    .stat-value {
+        font-size: 1.25rem;
+    }
+
+    .form-group {
+        margin-bottom: 1rem;
+    }
+
+    .progress-steps {
+        gap: 0.25rem;
+    }
+
+    .progress-step {
+        font-size: 0.65rem;
+        padding: 0.25rem 0;
+    }
+
+    .table-footer {
+        flex-direction: column;
+        gap: 0.75rem;
+        align-items: flex-start;
+    }
+
+    .nav-item {
+        padding: 0.75rem 0.75rem;
+    }
+
+    .nav-icon {
+        margin-right: 8px;
+        font-size: 1rem;
+    }
+}
+
+/* Print styles */
+@media print {
+    .topbar,
+    .sidebar,
+    .logout-link,
+    .btn-submit,
+    .page-btn {
+        display: none;
+    }
+
+    body {
+        background: #fff;
+    }
+
+    .panel {
+        box-shadow: none;
+        border: 1px solid #ccc;
+        page-break-inside: avoid;
+    }
+}
+
+/* Reduce motion for users who prefer it */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }
