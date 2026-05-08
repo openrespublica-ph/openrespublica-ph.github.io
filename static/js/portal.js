@@ -1,1082 +1,506 @@
-/* ============================================================
-   OpenResPublica TruthChain — Civic Document Design System
-   style.css — single source of truth for all portal styling
+// static/js/portal.js
+// ORP Engine — Operator Portal behaviour layer.
+// Handles: navigation, file drop, upload form, ledger, dashboard, lock button.
+// 
+// Key principles:
+//   - Progressive enhancement: works even if JS fails
+//   - Accessibility: ARIA labels, semantic HTML, keyboard support
+//   - Performance: lazy-load data only when needed
+//   - Security: no inline event handlers, CSP-compliant
 
-   Structure:
-     1.  CSS Variables (global design tokens)
-     2.  Base / Reset
-     3.  Topbar
-     4.  Layout (sidebar + main content)
-     5.  Sidebar & Navigation
-     6.  Panels
-     7.  Tables & Ledger
-     8.  Dashboard Stats
-     9.  Civic Section Block
-     10. Alerts
-     11. Forms & Inputs
-     12. Buttons
-     13. File Drop Zone
-     14. Progress Indicator
-     15. Result Box
-     16. Spinner
-     17. Footer
-     18. Media Queries (Responsive)
-   ============================================================ */
+'use strict';  // catch common errors early
 
-/* Google Fonts — loaded once, used via CSS variables below.
-   Playfair Display : panel titles, stat values (serif, civic feel)
-   Source Sans 3    : body text, labels, UI copy (clean, readable)
-   IBM Plex Mono    : hashes, control numbers, code (fixed-width) */
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;600&family=Source+Sans+3:wght@300;400;500;600&display=swap');
+// ── ENTRY POINT ──────────────────────────────────────────────────
+// DOMContentLoaded fires when the HTML is fully parsed and all elements
+// exist in the DOM. We wait for this before attaching any event listeners.
+document.addEventListener('DOMContentLoaded', () => {
+    console.log('[ORP Portal] Initializing...');
+    initNavigation();
+    initLockButton();
+    initFileDrop();
+    initUploadForm();
+    initLedgerPagination();
+    loadDashboard();  // fetch manifest stats immediately on page load
+    console.log('[ORP Portal] Ready');
+});
 
 
-/* ── 1. CSS VARIABLES ────────────────────────────────────────────
-   Define all colors and fonts once here — the "global scope" for styling.
-   To change the brand color across the entire portal, change one line here.
-   All rules below reference these variables via var(--name). */
-:root {
-    /* Brand colors */
-    --navy:       #002147;   /* darkest — used for hover states */
-    --navy-deep:  #001530;   /* topbar background */
-    --navy-mid:   #003366;   /* primary action color — buttons, active nav, titles */
-    --gold:       #C9A84C;   /* accent — topbar border, section markers, badges */
-    --gold-pale:  #FDF3D0;   /* light gold — badge backgrounds, hover tints */
+// ── NAVIGATION ───────────────────────────────────────────────────
+// One function handles all nav buttons — regardless of how many exist.
+// This is event delegation: instead of one listener per button,
+// we loop once and attach the same logic to each button.
+// The data-target attribute on each button tells us which panel to show.
+function initNavigation() {
+    document.querySelectorAll('.nav-item[data-target]').forEach(btn => {
+        btn.addEventListener('click', e => {
+            e.preventDefault();
+            const target = e.currentTarget.getAttribute('data-target');
+            if (!target) return;
 
-    /* Neutral colors */
-    --white:  #FAFAF7;   /* off-white — page background alternative */
-    --ink:    #1A1A2E;   /* body text */
-    --muted:  #6B7280;   /* secondary text, labels, placeholders */
-    --border: rgba(0, 33, 71, 0.1);  /* subtle borders throughout */
+            // Remove "active" from every nav item, then add it to the clicked one.
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            e.currentTarget.classList.add('active');
+            e.currentTarget.setAttribute('aria-current', 'page');
 
-    /* Semantic colors */
-    --green:      #1E7A3E;   /* success states */
-    --green-pale: #F0FAF4;   /* success backgrounds */
-    --red:        #B91C1C;   /* error states */
-    --red-pale:   #FEF2F2;   /* error backgrounds */
-    --blue-pale:  #EFF6FF;   /* info alert background */
+            // Remove "active" from every panel, then add it to the target panel.
+            // CSS does the rest: .panel { display:none } .panel.active { display:block }
+            document.querySelectorAll('.panel').forEach(p => {
+                p.classList.remove('active');
+                p.removeAttribute('aria-current');
+            });
+            const targetPanel = document.getElementById('panel-' + target);
+            if (targetPanel) {
+                targetPanel.classList.add('active');
 
-    /* Typography */
-    --font-serif: 'Playfair Display', serif;
-    --font-sans:  'Source Sans 3', sans-serif;
-    --font-mono:  'IBM Plex Mono', monospace;
+                // Load data on demand — only when the operator actually navigates there.
+                // This avoids unnecessary network requests on page load.
+                if (target === 'ledger')    loadLedger();
+                if (target === 'dashboard') loadDashboard();
+            }
+        });
+    });
+}
+
+
+// ── LOCK BUTTON ──────────────────────────────────────────────────
+// Sends POST /lock_engine to Flask.
+// Flask fires SIGINT after a 0.5s delay → graceful_shutdown() →
+// shell trap in run_orp.sh → RAM disk wiped → session dead.
+// The try/catch is intentional: after Flask fires SIGINT the connection
+// resets, which would normally throw a network error. We catch it silently
+// because the lock succeeded — the error is expected, not a failure.
+function initLockButton() {
+    const lockBtn = document.getElementById('lockBtn');
+    if (!lockBtn) return;
+
+    lockBtn.addEventListener('click', async () => {
+        if (!confirm('Shut down engine and purge RAM disk? This cannot be undone.')) return;
+        
+        try {
+            lockBtn.disabled = true;
+            lockBtn.textContent = '⏳ Locking...';
+            
+            const res = await fetch('/lock_engine', { method: 'POST' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            
+        } catch (err) {
+            // Expected: server closes the connection after SIGINT.
+            // This is not a real error — the operation succeeded.
+            console.info('[ORP Portal] Lock signal sent, connection reset expected');
+        }
+        
+        // Show locked screen
+        document.body.innerHTML = `
+            <div style="text-align:center;padding:5rem;font-family:sans-serif;background:#F0F2F5;min-height:100vh;display:flex;align-items:center;justify-content:center;">
+                <div>
+                    <h1 style="font-size:2.5rem;margin-bottom:1rem;">🏛️ Engine Locked</h1>
+                    <p style="color:#6B7280;font-size:1.1rem;margin-bottom:2rem;">RAM disk purged. Session closed securely.</p>
+                    <p style="color:#999;font-size:0.9rem;">The ORP Engine has been shut down safely.</p>
+                </div>
+            </div>`;
+    });
+}
+
+
+// ── FILE DROP UX ─────────────────────────────────────────────────
+// The native <input type="file"> is hidden because it cannot be styled.
+// This function makes the styled .file-drop div behave like a file input:
+//   - Click on the zone → programmatically clicks the hidden input
+//   - Drag a file over  → visual feedback (dragover class)
+//   - Drop a file       → attaches it to the hidden input
+// The hidden input then holds the file exactly as if the operator
+// had clicked it directly — FormData picks it up normally.
+function initFileDrop() {
+    const dropZone  = document.getElementById('dropZone');
+    const fileInput = document.getElementById('pdfFile');
+    if (!dropZone || !fileInput) return;
+
+    // Make the drop zone keyboard-accessible
+    dropZone.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            fileInput.click();
+        }
+    });
+
+    // Click on the styled zone → open the native file picker.
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    // Visual feedback while dragging a file over the zone.
+    dropZone.addEventListener('dragover', e => {
+        e.preventDefault();  // must preventDefault to allow drop
+        e.stopPropagation();
+        dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('dragover');
+    });
+
+    // File dropped — validate it's a PDF, then attach to the hidden input.
+    dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.remove('dragover');
+        
+        const file = e.dataTransfer.files[0];
+        if (file?.name.toLowerCase().endsWith('.pdf')) {
+            fileInput.files = e.dataTransfer.files;
+            updateFileDisplay(fileInput);
+        } else {
+            alert('Please drop a PDF file.');
+        }
+    });
+
+    // File selected via the native picker — update the display.
+    fileInput.addEventListener('change', () => updateFileDisplay(fileInput));
+}
+
+// Shows the selected filename and size inside the drop zone.
+// Called after both drop and native file picker selection.
+function updateFileDisplay(input) {
+    const file = input.files[0];
+    if (!file) return;
     
-    /* Transitions */
-    --transition-fast: 0.15s ease;
-    --transition-normal: 0.2s ease;
-    --transition-smooth: 0.5s ease;
+    const el         = document.getElementById('selectedFileName');
+    const sizeKB     = (file.size / 1024).toFixed(1);
+    el.textContent   = `✓ ${file.name} (${sizeKB} KB)`;
+    el.style.display = 'inline-block';
 }
 
-/* Dark mode support (optional) */
-@media (prefers-color-scheme: dark) {
-    :root {
-        --white: #1F2937;
-        --ink: #F3F4F6;
-        --muted: #9CA3AF;
-        --border: rgba(255, 255, 255, 0.1);
+
+// ── UI HELPERS ───────────────────────────────────────────────────
+
+// Animates the progress steps (us1–us4 for upload).
+// step: the current active step number (1-indexed)
+// total: total number of steps
+// Steps before current → "done" (green)
+// Current step         → "active" (navy, highlighted)
+// Steps after current  → unstyled (grey)
+function setProgress(prefix, step, total) {
+    for (let i = 1; i <= total; i++) {
+        const el = document.getElementById(prefix + i);
+        if (!el) continue;
+        
+        el.className = 'progress-step' +
+            (i < step ? ' done' : i === step ? ' active' : '');
+        
+        // Update aria-label for accessibility
+        el.setAttribute('aria-label', `Step ${i} of ${total}${i < step ? ' completed' : i === step ? ' in progress' : ''}`);
+    }
+    
+    // Move the progress bar proportionally.
+    const bar = document.getElementById('uploadBar');
+    if (bar) {
+        const percent = Math.min(100, (step / total) * 100);
+        bar.style.width = `${percent}%`;
     }
 }
 
+// Renders the result box after Flask responds.
+// id:       the DOM id of the result box
+// ok:       true = success (green), false = error (red)
+// title:    headline text
+// details:  object → renders as key/value pairs
+//           string → renders as a paragraph
+// blob:     the stamped PDF as a Blob object (browser RAM, not server)
+// filename: the download filename from Content-Disposition header
+function showResult(id, ok, title, details, blob, filename) {
+    const el         = document.getElementById(id);
+    el.className     = 'result-box ' + (ok ? 'result-success' : 'result-error');
+    el.style.display = 'block';
 
-/* ── 2. BASE / RESET ─────────────────────────────────────────────
-   Remove browser default margin/padding, set the base font and color.
-   Normalize across all browsers. */
-* {
-    box-sizing: border-box;
+    // Build the details section.
+    let dHtml = '';
+    if (details && typeof details === 'object') {
+        dHtml = '<div class="result-kv">' +
+            Object.entries(details).map(([k, v]) =>
+                `<span class="result-key">${htmlEscape(k)}</span>` +
+                `<span class="result-val">${htmlEscape(String(v))}</span>`
+            ).join('') +
+            '</div>';
+    } else if (details) {
+        dHtml = `<p style="margin-top:0.5rem;">${htmlEscape(String(details))}</p>`;
+    }
+
+    // Build the download link.
+    // createObjectURL creates a temporary URL pointing to the blob in RAM.
+    // This URL never exists on the server — it's ephemeral to this browser tab.
+    // a.click() simulates a download without the operator clicking anything.
+    let dlHtml = '';
+    if (blob && filename) {
+        const url = URL.createObjectURL(blob);
+        dlHtml = `<a href="${url}" download="${htmlEscape(filename)}" class="download-btn">` +
+                 `⬇ Download ${htmlEscape(filename)}</a>`;
+    }
+
+    el.innerHTML =
+        `<div class="result-header"><h4>${ok ? '✅' : '❌'} ${htmlEscape(title)}</h4></div>` +
+        `<div class="result-body">${dHtml}${dlHtml}</div>`;
+
+    // Announce result to screen readers
+    el.setAttribute('role', 'alert');
+    el.setAttribute('aria-live', 'assertive');
 }
 
-html {
-    scroll-behavior: smooth;
+// Sanitize strings to prevent XSS — escapes HTML special characters
+function htmlEscape(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
-body {
-    margin: 0;
-    padding: 0;
-    font-family: var(--font-sans);
-    background: #F0F2F5;
-    color: var(--ink);
-    line-height: 1.6;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
+
+// ── UPLOAD FORM ──────────────────────────────────────────────────
+// Handles the entire PDF upload flow:
+//   1. Validate file is selected
+//   2. Disable button (prevent duplicate submissions)
+//   3. Show progress steps
+//   4. Pack file + doc_type into FormData
+//   5. POST to Flask /upload
+//   6. Animate progress steps while waiting
+//   7. On response: show result + download link, or error
+//   8. Re-enable button, hide progress
+function initUploadForm() {
+    const form = document.getElementById('uploadForm');
+    if (!form) return;
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+
+        const file    = document.getElementById('pdfFile').files[0];
+        const docType = document.getElementById('uploadDocType').value;
+        const btn     = document.getElementById('uploadBtn');
+        const progress = document.getElementById('uploadProgress');
+        const result = document.getElementById('uploadResult');
+
+        if (!file) { 
+            alert('Please select a PDF file.');
+            return;
+        }
+
+        // Validate file size (20MB)
+        const maxSize = 20 * 1024 * 1024;
+        if (file.size > maxSize) {
+            alert(`File is too large. Maximum size is 20MB, yours is ${(file.size / 1024 / 1024).toFixed(1)}MB.`);
+            return;
+        }
+
+        // Disable the button immediately — prevents duplicate submissions
+        // while Flask is still processing. Re-enabled in the finally block.
+        btn.disabled = true;
+
+        // Show the progress section, hide any previous result.
+        progress.style.display = 'block';
+        result.style.display   = 'none';
+
+        // Animate steps 1-3 on a timer.
+        // These are theatre — they don't reflect real Flask progress.
+        // Step 4 fires only when Flask actually responds (below).
+        // Timings: 100ms, 800ms, 1500ms after submit.
+        [1, 2, 3].forEach((s, i) =>
+            setTimeout(() => setProgress('us', s, 4), i * 700 + 100)
+        );
+
+        // FormData packs the file and doc_type exactly as if the browser
+        // submitted a traditional HTML form. Flask reads them via
+        // request.files.get('document') and request.form.get('doc_type').
+        const fd = new FormData();
+        fd.append('document', file);
+        fd.append('doc_type', docType);
+
+        try {
+            // fetch() sends the POST request. await pauses THIS function
+            // here until Flask responds — but the browser tab stays alive
+            // and responsive. This is the key benefit of async/await.
+            const res = await fetch('/upload', { 
+                method: 'POST', 
+                body: fd,
+                signal: AbortSignal.timeout(180000)  // 3 minute timeout
+            });
+
+            // Step 4 fires on actual Flask response — the real signal.
+            setProgress('us', 4, 4);
+
+            if (res.ok) {
+                // res.ok is true for any 2xx status code (200, 201, etc.)
+                // res.blob() reads the response body as raw binary data —
+                // the stamped PDF that Flask sent via send_file().
+                const blob = await res.blob();
+
+                // The filename comes from Flask's Content-Disposition header:
+                // attachment; filename="Verified_2026-0042-BARANGAY-CERT.pdf"
+                // The regex extracts just the filename part.
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const filename = disposition.match(/filename="?([^"]+)"?/)?.[1] || `${docType}.pdf`;
+
+                showResult(
+                    'uploadResult', true,
+                    'Document Anchored to TruthChain',
+                    {
+                        'File':   file.name,
+                        'Type':   docType,
+                        'Status': 'Anchored · Publishing to ledger...',
+                    },
+                    blob, filename
+                );
+                
+                console.log('[ORP Portal] Upload successful:', filename);
+            } else {
+                // Flask returned a non-2xx status (400, 500, etc.)
+                // Try to parse the error as JSON, fall back to text.
+                let errorMsg = '';
+                try {
+                    const json = await res.json();
+                    errorMsg = json.message || json.error || 'Unknown error';
+                } catch {
+                    errorMsg = await res.text();
+                }
+                
+                showResult('uploadResult', false, 'Upload Failed', errorMsg);
+                console.warn('[ORP Portal] Upload failed:', res.status, errorMsg);
+            }
+
+        } catch (err) {
+            // Network error — Flask unreachable, connection dropped, timeout, etc.
+            let msg = err.message;
+            if (err.name === 'AbortError') {
+                msg = 'Request timed out. The server may be overloaded or unreachable.';
+            }
+            showResult('uploadResult', false, 'Connection Error', msg);
+            console.error('[ORP Portal] Connection error:', err);
+
+        } finally {
+            // finally runs whether the request succeeded or failed.
+            // Always re-enable the button and hide progress after 3.5s.
+            btn.disabled = false;
+            setTimeout(() => {
+                progress.style.display = 'none';
+                setProgress('us', 0, 4);  // reset all steps to unstyled
+            }, 3500);
+        }
+    });
 }
 
-/* Accessibility: high contrast mode support */
-@media (prefers-contrast: more) {
-    body {
-        background: #ffffff;
+
+// ── LEDGER ───────────────────────────────────────────────────────
+// Pagination state — module-level variables shared between
+// loadLedger(), renderLedgerTable(), and initLedgerPagination().
+let lData = [];   // full array of records from manifest.json
+let lPage = 1;    // current page number (1-indexed)
+const LP  = 15;   // records per page
+
+// Fetches manifest.json from the public GitHub Pages ledger.
+// Called when the operator clicks "Local Ledger" in the sidebar.
+// Uses ?t=Date.now() to bust the browser cache — ensures fresh data.
+async function loadLedger() {
+    // Show loading state while the fetch is in-flight.
+    document.getElementById('ledgerBody').innerHTML =
+        '<tr><td colspan="6" style="text-align:center;padding:1.5rem;color:var(--muted);">' +
+        '<div class="spinner"></div>Loading...</td></tr>';
+
+    try {
+        const res = await fetch(
+            'https://openrespublica.github.io/records/manifest.json?t=' + Date.now(),
+            { signal: AbortSignal.timeout(15000) }  // 15 second timeout
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        // manifest.json is newest-first (main.py uses records.insert(0, record)).
+        // .reverse() is NOT needed — data is already in the right order.
+        lData = await res.json();
+        lPage = 1;  // reset to first page on every fresh load
+        renderLedgerTable();
+        console.log('[ORP Portal] Ledger loaded:', lData.length, 'records');
+
+    } catch (err) {
+        document.getElementById('ledgerBody').innerHTML =
+            '<tr><td colspan="6" style="text-align:center;padding:1.5rem;color:var(--muted);">' +
+            'Could not load manifest. Check your connection.</td></tr>';
+        console.warn('[ORP Portal] Ledger load failed:', err);
     }
 }
 
-
-/* ── 3. TOPBAR ───────────────────────────────────────────────────
-   Sticky header — stays at the top as the user scrolls.
-   z-index:100 keeps it above all panel content. */
-.topbar {
-    background: var(--navy-deep);
-    border-bottom: 3px solid var(--gold);
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.topbar-inner {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 0.75rem 1.5rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-/* Brand — logo badge + name + subtitle */
-.brand { 
-    display: flex; 
-    align-items: center; 
-    gap: 0.85rem;
-    flex: 1;
-}
-
-.brand-badge {
-    width: 36px;
-    height: 36px;
-    background: var(--gold);
-    border-radius: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.1rem;
-    flex-shrink: 0;
-}
-
-.brand h1 { 
-    font-family: var(--font-serif); 
-    font-size: 1rem; 
-    color: #fff; 
-    margin: 0; 
-    font-weight: 700;
-}
-
-.brand p  { 
-    font-size: 0.65rem; 
-    color: var(--gold); 
-    margin: 0; 
-    opacity: 0.8;
-}
-
-/* Right side — status indicator + lock button */
-.topbar-right { 
-    color: #fff; 
-    font-size: 0.85rem; 
-    display: flex; 
-    align-items: center; 
-    gap: 0.5rem;
-    white-space: nowrap;
-}
-
-/* Animated green dot — "engine online" indicator */
-.status-dot {
-    width: 8px;
-    height: 8px;
-    background: #22C55E;
-    border-radius: 50%;
-    box-shadow: 0 0 8px #22C55E;
-    animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-
-/* Lock Engine button — styled to match the topbar, not a full button */
-.logout-link {
-    color: #fff;
-    font-weight: 600;
-    opacity: 0.8;
-    background: none;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-family: inherit;
-    cursor: pointer;
-    transition: opacity var(--transition-fast), background var(--transition-fast);
-}
-
-.logout-link:hover { 
-    opacity: 1; 
-    background: rgba(255, 255, 255, 0.1);
-}
-
-.logout-link:active {
-    transform: scale(0.98);
-}
-
-.logout-link:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-/* Focus visible for accessibility */
-.logout-link:focus-visible {
-    outline: 2px solid rgba(255, 255, 255, 0.5);
-    outline-offset: 2px;
-}
-
-
-/* ── 4. LAYOUT ───────────────────────────────────────────────────
-   Two-column flex layout: sidebar (fixed) + main content (flexible).
-   max-width centers the content on wide screens. */
-.layout {
-    display: flex;
-    max-width: 1400px;
-    margin: 1.5rem auto;
-    gap: 1.5rem;
-    padding: 0 1.5rem;
-    min-height: 80vh;
-}
-
-.sidebar { 
-    width: 260px; 
-    flex-shrink: 0;
-}
-
-.main-content { 
-    flex-grow: 1; 
-    min-width: 0;
-}
-
-/* min-width:0 prevents flex children from overflowing on narrow screens */
-
-
-/* ── 5. SIDEBAR & NAVIGATION ─────────────────────────────────────
-   Section headers are purely visual labels — not interactive. */
-.sidebar-section {
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    font-weight: 700;
-    margin: 1.5rem 0 0.5rem 0.75rem;
-}
-
-/* Nav items — both <button> and <a> use this class for consistent appearance. */
-.nav-item {
-    display: flex;
-    align-items: center;
-    width: 100%;
-    padding: 0.85rem 1rem;
-    border: none;
-    background: none;
-    border-radius: 8px;
-    color: var(--navy-mid);
-    font-family: inherit;
-    font-weight: 500;
-    font-size: 0.88rem;
-    cursor: pointer;
-    text-align: left;
-    text-decoration: none;
-    margin-bottom: 0.25rem;
-    box-sizing: border-box;
-    transition: background var(--transition-fast);
-}
-
-.nav-item:hover { 
-    background: rgba(0, 33, 102, 0.05);
-}
-
-.nav-item.active { 
-    background: var(--navy-mid); 
-    color: #fff;
-    font-weight: 600;
-}
-
-/* Focus visible for accessibility */
-.nav-item:focus-visible {
-    outline: 2px solid var(--navy-mid);
-    outline-offset: 2px;
-}
-
-/* Icon inside each nav item */
-.nav-icon { 
-    margin-right: 12px; 
-    font-size: 1.1rem;
-    flex-shrink: 0;
-}
-
-
-/* ── 6. PANELS ───────────────────────────────────────────────────
-   All panels exist in the DOM. CSS hides them all by default.
-   JavaScript adds/removes "active" to show the correct one. */
-.panel {
-    background: #fff;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-    display: none;
-    animation: slideIn 0.3s ease;
-}
-
-.panel.active { 
-    display: block;
-}
-
-@keyframes slideIn {
-    from {
-        opacity: 0;
-        transform: translateY(10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.panel-header {
-    padding: 1.5rem;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-}
-
-.panel-icon { 
-    font-size: 1.8rem;
-    flex-shrink: 0;
-}
-
-.panel-title { 
-    font-family: var(--font-serif); 
-    font-size: 1.25rem; 
-    color: var(--navy-mid); 
-    font-weight: 700;
-}
-
-.panel-subtitle { 
-    font-size: 0.85rem; 
-    color: var(--muted);
-}
-
-.panel-body { 
-    padding: 1.5rem;
-}
-
-
-/* ── 7. TABLES & LEDGER ──────────────────────────────────────────
-   Used in the Local Ledger panel. */
-table { 
-    width: 100%; 
-    border-collapse: collapse;
-}
-
-th {
-    text-align: left;
-    padding: 1rem;
-    background: #F9FAFB;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
-    font-weight: 600;
-}
-
-td {
-    padding: 1rem;
-    border-bottom: 1px solid var(--border);
-    font-size: 0.85rem;
-}
-
-tr:hover {
-    background: rgba(0, 33, 102, 0.02);
-}
-
-/* Footer bar below the table — holds the record count and pagination buttons. */
-.table-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.75rem 1rem;
-    font-size: 0.8rem;
-    color: var(--muted);
-    border-top: 1px solid var(--border);
-    background: #F9FAFB;
-    border-radius: 0 0 12px 12px;
-}
-
-.page-btn {
-    padding: 0.35rem 0.75rem;
-    font-size: 0.78rem;
-    font-family: inherit;
-    font-weight: 500;
-    border: 1px solid var(--border);
-    background: #fff;
-    border-radius: 6px;
-    cursor: pointer;
-    color: var(--navy-mid);
-    transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.page-btn:hover:not(:disabled) { 
-    background: var(--gold-pale);
-    border-color: var(--gold);
-}
-
-.page-btn:active:not(:disabled) {
-    transform: scale(0.98);
-}
-
-.page-btn:disabled { 
-    opacity: 0.4; 
-    cursor: not-allowed;
-}
-
-.page-btn:focus-visible {
-    outline: 2px solid var(--navy-mid);
-    outline-offset: 2px;
-}
-
-/* Monospace hash/ID display — used in table cells */
-.mono {
-    font-family: var(--font-mono);
-    background: #F1F5F9;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    color: var(--navy-mid);
-}
-
-/* Document type badge — used in table cells */
-.badge-type {
-    background: var(--gold-pale);
-    color: #8a6a14;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.7rem;
-    font-weight: 600;
-    display: inline-block;
-}
-
-/* Verify link in ledger table */
-.btn-outline {
-    display: inline-block;
-    padding: 0.25rem 0.65rem;
-    background: transparent;
-    color: var(--navy-mid);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-decoration: none;
-    transition: background var(--transition-fast), border-color var(--transition-fast);
-    cursor: pointer;
-}
-
-.btn-outline:hover { 
-    background: var(--gold-pale);
-    border-color: var(--gold);
-}
-
-.btn-outline:focus-visible {
-    outline: 2px solid var(--navy-mid);
-    outline-offset: 2px;
-}
-
-
-/* ── 8. DASHBOARD STATS ──────────────────────────────────────────
-   Four stat cards in a responsive grid. */
-.stats-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.25rem;
-}
-
-.stat-card {
-    background: #F9FAFB;
-    border: 1px solid var(--border);
-    border-top: 4px solid var(--navy-mid);
-    border-radius: 10px;
-    padding: 1rem 1.25rem;
-    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.stat-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 33, 102, 0.1);
-}
-
-.stat-card--gold { 
-    border-top-color: var(--gold);
-}
-
-.stat-value {
-    font-family: var(--font-serif);
-    font-size: 1.6rem;
-    font-weight: 700;
-    color: var(--navy-mid);
-    line-height: 1.1;
-}
-
-.stat-value--green { 
-    color: var(--green);
-}
-
-.stat-label {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--muted);
-    margin-top: 0.25rem;
-    font-weight: 600;
-}
-
-
-/* ── 9. CIVIC SECTION BLOCK ──────────────────────────────────────
-   Gold left-border block used for descriptive text inside panels.
-   The section ID (e.g. "01 — Upload") is a visual label only. */
-.civic-section {
-    border-left: 4px solid var(--gold);
-    padding: 0.75rem 1rem;
-    background: #FAFAF7;
-    border-radius: 0 8px 8px 0;
-    margin-bottom: 1.25rem;
-}
-
-.civic-section-id {
-    font-size: 0.65rem;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--gold);
-    font-weight: 700;
-    display: block;
-    margin-bottom: 0.35rem;
-}
-
-.civic-body { 
-    font-size: 0.88rem; 
-    color: var(--muted);
-}
-
-.civic-body--sm { 
-    font-size: 0.83rem;
-}
-
-.civic-body p { 
-    margin: 0;
-}
-
-.civic-body em {
-    font-style: italic;
-    color: var(--navy-mid);
-    font-weight: 500;
-}
-
-
-/* ── 10. ALERTS ──────────────────────────────────────────────────
-   Warning and info banners in the Dashboard panel. */
-.alert-group { 
-    display: flex; 
-    flex-direction: column; 
-    gap: 0.65rem; 
-    margin-top: 1.25rem;
-}
-
-.alert {
-    padding: 0.75rem 1rem;
-    border-radius: 8px;
-    font-size: 0.83rem;
-    line-height: 1.5;
-    border-left: 4px solid;
-}
-
-.alert-warning {
-    background: #FFFBEB;
-    border-color: #FDE68A;
-    border-left-color: #F59E0B;
-    color: #92400E;
-}
-
-.alert-info {
-    background: var(--blue-pale);
-    border-color: #BFDBFE;
-    border-left-color: #3B82F6;
-    color: #1E3A8A;
-}
-
-
-/* ── 11. FORMS & INPUTS ──────────────────────────────────────────
-   Used in the upload form. */
-.form-group { 
-    margin-bottom: 1.25rem;
-}
-
-.form-label {
-    display: block;
-    font-size: 0.85rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-    color: var(--navy-mid);
-}
-
-.form-hint {
-    font-size: 0.75rem;
-    color: var(--muted);
-    margin-top: 0.4rem;
-}
-
-/* Shared input styles — select gets the same treatment as text inputs */
-.form-select,
-.form-input,
-.form-textarea {
-    width: 100%;
-    padding: 0.75rem;
-    border: 1.5px solid var(--border);
-    border-radius: 8px;
-    font-family: inherit;
-    font-size: 0.9rem;
-    box-sizing: border-box;
-    background: #fff;
-    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.form-select:focus,
-.form-input:focus,
-.form-textarea:focus {
-    outline: none;
-    border-color: var(--navy-mid);
-    box-shadow: 0 0 0 3px rgba(0, 33, 102, 0.1);
-}
-
-.form-textarea { 
-    min-height: 140px; 
-    resize: vertical;
-}
-
-/* Select dropdown arrow styling */
-.form-select {
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23003366'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 14l-7 7m0 0l-7-7m7 7V3'%3E%3C/path%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 0.75rem center;
-    background-size: 1.2em;
-    padding-right: 2.5rem;
-}
-
-
-/* ── 12. BUTTONS ───────────────────────────────────────────────── */
-
-/* Primary submit button — full width, navy */
-.btn-submit {
-    width: 100%;
-    padding: 0.85rem;
-    background: var(--navy-mid);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    font-family: inherit;
-    font-weight: 600;
-    font-size: 0.9rem;
-    cursor: pointer;
-    margin-top: 0.5rem;
-    transition: background var(--transition-normal), transform var(--transition-fast);
-}
-
-.btn-submit:hover { 
-    background: var(--navy);
-    transform: translateY(-1px);
-}
-
-.btn-submit:active {
-    transform: translateY(0);
-}
-
-.btn-submit:disabled { 
-    opacity: 0.6; 
-    cursor: not-allowed;
-    transform: none;
-}
-
-.btn-submit:focus-visible {
-    outline: 2px solid var(--navy-mid);
-    outline-offset: 2px;
-}
-
-
-/* ── 13. FILE DROP ZONE ──────────────────────────────────────────
-   The styled drop zone that sits over the hidden <input type="file">.
-   portal.js handles the click delegation and drag-and-drop logic. */
-.file-drop {
-    border: 2px dashed var(--border);
-    border-radius: 12px;
-    padding: 2rem;
-    text-align: center;
-    cursor: pointer;
-    transition: border-color var(--transition-normal), background var(--transition-normal);
-}
-
-.file-drop:hover { 
-    border-color: var(--navy-mid);
-}
-
-.file-drop:focus-visible {
-    outline: 2px solid var(--navy-mid);
-    outline-offset: 2px;
-}
-
-/* dragover class added/removed by portal.js during drag events */
-.file-drop.dragover {
-    border-color: var(--navy-mid);
-    background: rgba(0, 33, 102, 0.02);
-    border-width: 2px;
-}
-
-.file-drop-icon { 
-    font-size: 2rem; 
-    margin-bottom: 0.5rem;
-}
-
-.file-drop-hint { 
-    margin-top: 0.2rem; 
-    font-size: 0.75rem; 
-    color: var(--muted);
-}
-
-/* Badge shown after a file is selected — displays filename + size */
-.file-name-badge {
-    display: inline-block;
-    margin-top: 0.6rem;
-    padding: 3px 10px;
-    background: var(--green-pale);
-    color: var(--green);
-    border-radius: 4px;
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
-    font-weight: 600;
-}
-
-
-/* ── 14. PROGRESS INDICATOR ──────────────────────────────────────
-   Shows animated steps while Flask processes the upload.
-   Hidden by default — portal.js shows it on form submit. */
-.progress-wrap { 
-    display: none; 
-    margin-top: 1.25rem;
-}
-
-/* Row of step pills */
-.progress-steps { 
-    display: flex; 
-    gap: 0.5rem; 
-    margin-bottom: 0.75rem;
-}
-
-.progress-step {
-    flex: 1;
-    text-align: center;
-    font-size: 0.72rem;
-    font-weight: 600;
-    padding: 0.35rem 0;
-    border-radius: 6px;
-    background: #F1F5F9;
-    color: var(--muted);
-    border: 1.5px solid var(--border);
-    transition: background var(--transition-normal), color var(--transition-normal), border-color var(--transition-normal);
-}
-
-/* Current step — highlighted in navy */
-.progress-step.active {
-    background: var(--navy-mid);
-    color: #fff;
-    border-color: var(--navy-mid);
-}
-
-/* Completed steps — green */
-.progress-step.done {
-    background: var(--green-pale);
-    color: var(--green);
-    border-color: #86EFAC;
-}
-
-/* Thin progress bar beneath the steps */
-.progress-bar-wrap {
-    height: 5px;
-    background: #E5E7EB;
-    border-radius: 99px;
-    overflow: hidden;
-}
-
-.progress-bar {
-    height: 100%;
-    width: 0%;
-    background: var(--navy-mid);
-    border-radius: 99px;
-    transition: width var(--transition-smooth);
-}
-
-
-/* ── 15. RESULT BOX ──────────────────────────────────────────────
-   Shows after Flask responds — either success or error.
-   Hidden by default — portal.js populates and reveals it. */
-.result-box {
-    display: none;
-    margin-top: 1.25rem;
-    border-radius: 10px;
-    overflow: hidden;
-    border: 1.5px solid var(--border);
-    animation: slideIn 0.3s ease;
-}
-
-.result-success { 
-    border-color: #86EFAC;
-}
-
-.result-error { 
-    border-color: #FCA5A5;
-}
-
-.result-header { 
-    padding: 0.85rem 1rem; 
-    background: #F9FAFB; 
-    border-bottom: 1px solid var(--border);
-}
-
-.result-header h4 { 
-    margin: 0; 
-    font-size: 0.9rem; 
-    font-weight: 700; 
-    color: var(--navy-mid);
-}
-
-.result-success .result-header { 
-    background: var(--green-pale);
-}
-
-.result-error .result-header { 
-    background: var(--red-pale);
-}
-
-.result-body { 
-    padding: 1rem;
-}
-
-/* Key/value grid for success details (File, Type, Status) */
-.result-kv {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 0.4rem 1rem;
-    font-size: 0.83rem;
-    align-items: baseline;
-}
-
-.result-key { 
-    font-weight: 700; 
-    color: var(--muted); 
-    white-space: nowrap;
-}
-
-.result-val { 
-    color: var(--ink); 
-    word-break: break-all;
-}
-
-/* Download button — appears inside the result box on success.
-   Uses createObjectURL blob — not a server URL. */
-.download-btn {
-    display: inline-block;
-    margin-top: 0.85rem;
-    padding: 0.55rem 1.1rem;
-    background: var(--navy-mid);
-    color: #fff;
-    border-radius: 8px;
-    border: none;
-    text-decoration: none;
-    font-size: 0.83rem;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: background var(--transition-normal);
-}
-
-.download-btn:hover { 
-    background: var(--navy);
-}
-
-.download-btn:focus-visible {
-    outline: 2px solid var(--navy-mid);
-    outline-offset: 2px;
-}
-
-
-/* ── 16. SPINNER ─────────────────────────────────────────────────
-   CSS-only loading animation — no JS, no images.
-   Used in the ledger loading state. */
-@keyframes spin { 
-    to { transform: rotate(360deg); } 
-}
-
-.spinner {
-    width: 24px;
-    height: 24px;
-    border: 3px solid var(--border);
-    border-top-color: var(--navy-mid);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    display: inline-block;
-    vertical-align: middle;
-}
-
-
-/* ── 17. FOOTER ──────────────────────────────────────────────────
-   Simple text footer — identity and attribution only. */
-.site-footer {
-    text-align: center;
-    padding: 1.5rem;
-    font-size: 0.75rem;
-    color: var(--muted);
-    border-top: 1px solid var(--border);
-    margin-top: 2rem;
-    background: #FAFAF7;
-}
-
-
-/* ── 18. MEDIA QUERIES (RESPONSIVE) ──────────────────────────────
-   Mobile-first: base styles are mobile, media queries add desktop. */
-
-/* Tablet: 768px+ */
-@media (max-width: 1024px) {
-    .layout {
-        flex-direction: column;
-    }
-
-    .sidebar {
-        width: 100%;
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 0.5rem;
-    }
-
-    .sidebar-section {
-        grid-column: 1 / -1;
-    }
-}
-
-/* Mobile: 480px and down */
-@media (max-width: 640px) {
-    .topbar-inner {
-        flex-wrap: wrap;
-        gap: 1rem;
-    }
-
-    .brand h1 {
-        font-size: 0.9rem;
-    }
-
-    .brand p {
-        font-size: 0.6rem;
-    }
-
-    .topbar-right {
-        font-size: 0.75rem;
-        gap: 0.3rem;
-    }
-
-    .logout-link {
-        padding: 3px 8px;
-        font-size: 0.65rem;
-    }
-
-    .layout {
-        margin: 1rem;
-        gap: 1rem;
-        padding: 0;
-    }
-
-    .sidebar {
-        display: flex;
-        flex-direction: column;
-        width: 100%;
-        order: 2;
-    }
-
-    .main-content {
-        order: 1;
-    }
-
-    .panel-header {
-        flex-direction: column;
-        align-items: flex-start;
-        padding: 1rem;
-    }
-
-    .panel-body {
-        padding: 1rem;
-    }
-
-    .stats-row {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 0.75rem;
-    }
-
-    .stat-value {
-        font-size: 1.25rem;
-    }
-
-    .form-group {
-        margin-bottom: 1rem;
-    }
-
-    .progress-steps {
-        gap: 0.25rem;
-    }
-
-    .progress-step {
-        font-size: 0.65rem;
-        padding: 0.25rem 0;
-    }
-
-    .table-footer {
-        flex-direction: column;
-        gap: 0.75rem;
-        align-items: flex-start;
-    }
-
-    .nav-item {
-        padding: 0.75rem 0.75rem;
-    }
-
-    .nav-icon {
-        margin-right: 8px;
-        font-size: 1rem;
-    }
-}
-
-/* Print styles */
-@media print {
-    .topbar,
-    .sidebar,
-    .logout-link,
-    .btn-submit,
-    .page-btn {
-        display: none;
-    }
-
-    body {
-        background: #fff;
-    }
-
-    .panel {
-        box-shadow: none;
-        border: 1px solid #ccc;
-        page-break-inside: avoid;
-    }
-}
-
-/* Reduce motion for users who prefer it */
-@media (prefers-reduced-motion: reduce) {
-    * {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
+// Renders the current page of records into the table.
+// Called by loadLedger() on first load, and by pagination buttons.
+function renderLedgerTable() {
+    const total = lData.length;
+    const start = (lPage - 1) * LP;
+    const end   = Math.min(start + LP, total);
+    const slice = lData.slice(start, end);
+
+    document.getElementById('ledgerBody').innerHTML = slice.map(r => `
+        <tr>
+            <td>
+                <strong style="font-size:0.78rem;color:var(--navy-mid);">
+                    ${htmlEscape(r.control_number || '—')}
+                </strong>
+            </td>
+            <td><span class="badge-type">${htmlEscape(r.document_type || 'GENERAL')}</span></td>
+            <td style="font-size:0.75rem;color:var(--muted);">${htmlEscape(r.timestamp || '—')}</td>
+            <td><span class="mono">${htmlEscape((r.sha256_hash || '').substring(0, 14))}…</span></td>
+            <td><span class="mono">#${htmlEscape(String(r.immudb_transaction_id || '—'))}</span></td>
+            <td style="text-align:center;">
+                <a href="https://openrespublica.github.io/index.html?hash=${encodeURIComponent(r.sha256_hash)}"
+                   target="_blank" rel="noopener noreferrer" class="btn-outline">Verify</a>
+            </td>
+        </tr>`).join('');
+
+    // Update the record count label and pagination button states.
+    const countEl = document.getElementById('ledgerCount');
+    countEl.textContent = `Showing ${start + 1}–${end} of ${total} records`;
+    countEl.setAttribute('aria-live', 'polite');
+    
+    const prevBtn = document.getElementById('lPrev');
+    const nextBtn = document.getElementById('lNext');
+    prevBtn.disabled = lPage === 1;
+    nextBtn.disabled = end >= total;
+}
+
+// Attaches click listeners to the Prev/Next pagination buttons.
+// Called once on DOMContentLoaded — the buttons always exist in the DOM.
+function initLedgerPagination() {
+    document.getElementById('lPrev')?.addEventListener('click', () => {
+        lPage = Math.max(1, lPage - 1);
+        renderLedgerTable();
+        // Scroll to table top for better UX
+        document.querySelector('table')?.scrollIntoView({ behavior: 'smooth' });
+    });
+    
+    document.getElementById('lNext')?.addEventListener('click', () => {
+        lPage = Math.min(lPage + 1, Math.ceil(lData.length / LP));
+        renderLedgerTable();
+        document.querySelector('table')?.scrollIntoView({ behavior: 'smooth' });
+    });
+}
+
+
+// ── DASHBOARD ────────────────────────────────────────────────────
+// Fetches the manifest and updates the two live stat values.
+// Called on page load so the dashboard has data even before
+// the operator navigates to it.
+// Failures are silently ignored — dashboard stats are informational,
+// not critical. The operator can still use the upload form if this fails.
+async function loadDashboard() {
+    try {
+        const res = await fetch(
+            'https://openrespublica.github.io/records/manifest.json?t=' + Date.now(),
+            { signal: AbortSignal.timeout(15000) }  // 15 second timeout
+        );
+        if (!res.ok) return;
+
+        // manifest.json is newest-first — data[0] is the most recent record.
+        const data = await res.json();
+        const totalEl = document.getElementById('dTotal');
+        const latestEl = document.getElementById('dLatest');
+        
+        if (totalEl) totalEl.textContent = data.length;
+        if (latestEl) latestEl.textContent =
+            (data[0]?.timestamp || '').split(' ')[0] || '—';
+
+        console.log('[ORP Portal] Dashboard stats updated');
+
+    } catch (err) {
+        console.info('[ORP Portal] Dashboard stats unavailable (non-critical):', err.message);
     }
 }
