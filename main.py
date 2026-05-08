@@ -1,4 +1,4 @@
-# main.py — ORP Engine · PDF Stamp & Anchor Service (IMPROVED)
+# main.py — ORP Engine · PDF Stamp & Anchor Service (IMPROVED v2)
 # Part of the OpenResPublica TruthChain stack.
 # Must be launched via run_orp.sh or run_orp-gum.sh — never directly.
 
@@ -13,6 +13,8 @@ import threading    # Lock() for control numbers, Timer for shutdown
 import signal       # graceful shutdown on SIGINT / SIGTERM
 import time         # retry delays
 import fcntl        # file locking for process safety
+import subprocess   # git commands
+import logging      # structured logging
 
 # Third-party — all listed in requirements.txt.
 import gnupg        # GPG signing of audit records
@@ -38,6 +40,15 @@ import getpass                                  # secure password prompt (no ech
 # Load .env file into environment before reading any variables.
 load_dotenv()
 
+# ── LOGGING CONFIGURATION ────────────────────────────────────────
+# Structured logging with timestamps and severity levels
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
 
 # ── 1. SECURITY ENVIRONMENT VALIDATION ───────────────────────────
 # These three variables prove the engine was launched correctly
@@ -49,25 +60,22 @@ GPG_EMAIL     = os.getenv("OPERATOR_GPG_EMAIL")
 SSH_AUTH_SOCK = os.getenv("SSH_AUTH_SOCK")  # proves the GPG agent is live
 
 if not all([GPG_HOME, GPG_EMAIL, SSH_AUTH_SOCK]):
-    print("\n" + "!" * 50)
-    print("  CRITICAL SECURITY FAILURE: ENVIRONMENT INCOMPLETE")
-    print("  - GPG_HOME: ",  "✅" if GPG_HOME      else "❌ MISSING")
-    print("  - GPG_EMAIL: ", "✅" if GPG_EMAIL      else "❌ MISSING")
-    print("  - SSH_SOCK: ",  "✅" if SSH_AUTH_SOCK  else "❌ MISSING")
-    print("!" * 50 + "\n")
+    logger.critical("SECURITY FAILURE: Required environment variables missing")
+    logger.critical(f"  - GPG_HOME: {'✅' if GPG_HOME else '❌ MISSING'}")
+    logger.critical(f"  - GPG_EMAIL: {'✅' if GPG_EMAIL else '❌ MISSING'}")
+    logger.critical(f"  - SSH_SOCK: {'✅' if SSH_AUTH_SOCK else '❌ MISSING'}")
     raise RuntimeError("Engine must be launched via run_orp.sh or run_orp-gum.sh")
 
 # GPG_HOME must live in RAM (/dev/shm) — never on disk.
 # If it's on disk, private keys survive a session, which is a vulnerability.
 if not GPG_HOME.startswith("/dev/shm/"):
-    raise RuntimeError(
-        "VULNERABILITY DETECTED: GNUPGHOME must be in RAM (/dev/shm). "
-        "Launch via the boot script."
-    )
+    logger.critical("VULNERABILITY: GNUPGHOME must be in RAM (/dev/shm)")
+    raise RuntimeError("Launch via the boot script with RAM-based keyring")
 
 # Initialize the GPG interface pointing at the ephemeral RAM keyring.
 gpg = gnupg.GPG(gnupghome=GPG_HOME)
 gpg.decode_errors = 'replace'
+logger.info(f"✅ GPG environment initialized in {GPG_HOME}")
 
 
 # ── 2. CONFIGURATION ─────────────────────────────────────────────
@@ -91,8 +99,11 @@ RECORDS_DIR  = os.path.join(REPO_PATH, "docs", "records")
 CONTROL_FILE = os.path.join(REPO_PATH, "docs", "control_number.txt")
 
 # Vault retry configuration
-VAULT_MAX_RETRIES = 3
-VAULT_RETRY_DELAY = 1  # seconds
+VAULT_MAX_RETRIES = int(os.getenv("VAULT_MAX_RETRIES", "3"))
+VAULT_RETRY_DELAY = int(os.getenv("VAULT_RETRY_DELAY", "1"))  # seconds
+
+# File upload constraints
+MAX_PDF_SIZE = int(os.getenv("MAX_PDF_SIZE", "20 * 1024 * 1024"))  # 20MB
 
 
 # ── 3. FLASK INITIALIZATION ───────────────────────────────────────
@@ -110,6 +121,7 @@ git_lock  = threading.Lock()
 
 # Ensure the records directory exists before anything tries to write to it.
 os.makedirs(RECORDS_DIR, exist_ok=True)
+logger.info(f"✅ Records directory ready: {RECORDS_DIR}")
 
 
 # ── 4. VAULT CONNECTION ───────────────────────────────────────────
@@ -129,14 +141,16 @@ def get_client() -> ImmudbClient:
     # Split host:port explicitly — avoids gRPC defaulting to port 443.
     if ":" in IMMUDB_HOST:
         host, port = IMMUDB_HOST.rsplit(":", 1)
-        port = int(port)
+        try:
+            port = int(port)
+        except ValueError:
+            logger.error(f"Invalid port in IMMUDB_HOST: {IMMUDB_HOST}")
+            port = 3322
     else:
         host, port = IMMUDB_HOST, 3322
 
     if _vault_password is None:
-        print("\n" + "=" * 42)
-        print("      ORP VAULT — DIRECT ACCESS")
-        print("=" * 42)
+        logger.info("Prompting for vault password...")
         _vault_password = getpass.getpass(
             f"Enter password for vault user [{IMMUDB_USER}]: "
         )
@@ -144,15 +158,18 @@ def get_client() -> ImmudbClient:
     try:
         c = ImmudbClient(f"{host}:{port}")
         c.login(IMMUDB_USER, _vault_password, database=IMMUDB_DB)
-        print(f"✅ Vault unlocked → {host}:{port}/{IMMUDB_DB}")
+        logger.info(f"✅ Vault unlocked → {host}:{port}/{IMMUDB_DB}")
         return c
     except Exception as e:
-        print(f"\n[!] ACCESS DENIED → {host}:{port}")
-        print(f"    Details: {e}")
-        exit(1)
+        logger.error(f"Vault access denied: {e}")
+        raise
 
 # Connect once at startup — Flask routes reuse this global client.
-client = get_client()
+try:
+    client = get_client()
+except Exception as e:
+    logger.critical(f"Failed to initialize vault connection: {e}")
+    exit(1)
 
 
 # ── 5. GRACEFUL SHUTDOWN ──────────────────────────────────────────
@@ -162,11 +179,12 @@ def graceful_shutdown(signum, frame):
     Logs out of immudb, then forces exit so the shell trap in
     run_orp.sh / run_orp-gum.sh fires the RAM disk cleanup.
     """
-    print("\n[!] EMERGENCY SCRAM — Purging session...")
+    logger.warning("Received shutdown signal — purging session...")
     try:
         client.logout()
-    except Exception:
-        pass
+        logger.info("✅ Vault session closed")
+    except Exception as e:
+        logger.warning(f"Vault logout error: {e}")
     os._exit(0)  # os._exit bypasses Python cleanup to ensure shell trap fires
 
 signal.signal(signal.SIGINT,  graceful_shutdown)
@@ -181,25 +199,29 @@ def sign_json_data(record: dict) -> dict | None:
     Returns the signature block to embed in the record, or None on failure.
     The key never touches disk — it lives only in /dev/shm for this session.
     """
-    data_str = json.dumps(record, sort_keys=True)
-    sig      = gpg.sign(data_str, keyid=GPG_EMAIL)
+    try:
+        data_str = json.dumps(record, sort_keys=True)
+        sig      = gpg.sign(data_str, keyid=GPG_EMAIL)
 
-    if sig.status != "signature created":
-        print(f"❌ GPG signing failed: {sig.stderr}")
+        if sig.status != "signature created":
+            logger.error(f"GPG signing failed: {sig.stderr}")
+            return None
+
+        return {
+            "gpg_signature":   str(sig),
+            "hash_anchor":     hashlib.sha256(data_str.encode()).hexdigest(),
+            "integrity_scope": "EPHEMERAL_RAM_LEGAL_SIGNATURE",
+        }
+    except Exception as e:
+        logger.error(f"Error during JSON signing: {e}")
         return None
-
-    return {
-        "gpg_signature":   str(sig),
-        "hash_anchor":     hashlib.sha256(data_str.encode()).hexdigest(),
-        "integrity_scope": "EPHEMERAL_RAM_LEGAL_SIGNATURE",
-    }
 
 
 def next_control_number() -> str:
     """
     Issues the next sequential control number for this calendar year.
     
-    IMPROVED: Uses both threading.Lock AND file locking for process safety.
+    Uses both threading.Lock AND file locking for process safety.
     The threading lock prevents race conditions between threads.
     The fcntl file lock prevents race conditions between processes.
     
@@ -223,8 +245,13 @@ def next_control_number() -> str:
         with open(CONTROL_FILE, "r+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)  # Exclusive lock
             try:
-                parts = f.read().strip().split("-")
-                year, num = parts[0], int(parts[1])
+                content = f.read().strip()
+                if not content:
+                    parts = [current_year, 0]
+                else:
+                    parts = content.split("-")
+                    
+                year, num = parts[0], int(parts[1]) if len(parts) > 1 else 0
 
                 # Reset counter on new year.
                 if year != current_year:
@@ -237,6 +264,7 @@ def next_control_number() -> str:
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)  # Release lock
 
+        logger.info(f"Control number issued: {new_ctrl}")
         return new_ctrl
 
 
@@ -246,20 +274,24 @@ def generate_qr(sha256_hash: str) -> tuple[io.BytesIO, str]:
     for this document. Scanning the QR opens the public ledger
     pre-filtered to this exact document's hash.
     """
-    qr_url = f"{GITHUB_PORTAL}?hash={sha256_hash}"
-    qr     = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(qr_url)
-    qr_img = qr.make_image(fill_color="black", back_color="white")
+    try:
+        qr_url = f"{GITHUB_PORTAL}?hash={sha256_hash}"
+        qr     = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_url)
+        qr_img = qr.make_image(fill_color="black", back_color="white")
 
-    buf = io.BytesIO()
-    qr_img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf, qr_url
+        buf = io.BytesIO()
+        qr_img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf, qr_url
+    except Exception as e:
+        logger.error(f"QR code generation failed: {e}")
+        raise
 
 
 def add_footer(
@@ -278,45 +310,49 @@ def add_footer(
     Uses ReportLab to draw on an overlay canvas, then merges
     that overlay onto each page using pypdf.
     """
-    reader   = PdfReader(io.BytesIO(original_pdf))
-    writer   = PdfWriter()
-    qr_image = ImageReader(qr_buf)
+    try:
+        reader   = PdfReader(io.BytesIO(original_pdf))
+        writer   = PdfWriter()
+        qr_image = ImageReader(qr_buf)
 
-    for page in reader.pages:
-        packet = io.BytesIO()
-        c      = canvas.Canvas(packet, pagesize=A4)
+        for page in reader.pages:
+            packet = io.BytesIO()
+            c      = canvas.Canvas(packet, pagesize=A4)
 
-        # Horizontal rule above the stamp area.
-        c.setLineWidth(0.5)
-        c.line(25 * mm, 22 * mm, 185 * mm, 22 * mm)
+            # Horizontal rule above the stamp area.
+            c.setLineWidth(0.5)
+            c.line(25 * mm, 22 * mm, 185 * mm, 22 * mm)
 
-        # Three metadata fields beneath the rule.
-        items = [
-            ("TIMESTAMP", timestamp),
-            ("CTRL NO",   control_number),
-            ("HASH",      sha256_hash[:32] + "..."),
-        ]
-        y = 18 * mm
-        for label, val in items:
-            c.setFont("Helvetica-Bold", 7)
-            c.drawString(30 * mm, y, f"{label}:")
-            c.setFont("Helvetica", 7)
-            c.drawString(55 * mm, y, str(val))
-            y -= 3.5 * mm
+            # Three metadata fields beneath the rule.
+            items = [
+                ("TIMESTAMP", timestamp),
+                ("CTRL NO",   control_number),
+                ("HASH",      sha256_hash[:32] + "..."),
+            ]
+            y = 18 * mm
+            for label, val in items:
+                c.setFont("Helvetica-Bold", 7)
+                c.drawString(30 * mm, y, f"{label}:")
+                c.setFont("Helvetica", 7)
+                c.drawString(55 * mm, y, str(val))
+                y -= 3.5 * mm
 
-        # QR code in the bottom-right corner of the stamp area.
-        c.drawImage(qr_image, 165 * mm, 5 * mm, width=15 * mm, height=15 * mm)
-        c.save()
-        packet.seek(0)
+            # QR code in the bottom-right corner of the stamp area.
+            c.drawImage(qr_image, 165 * mm, 5 * mm, width=15 * mm, height=15 * mm)
+            c.save()
+            packet.seek(0)
 
-        # Merge the stamp overlay onto the original page.
-        page.merge_page(PdfReader(packet).pages[0])
-        writer.add_page(page)
+            # Merge the stamp overlay onto the original page.
+            page.merge_page(PdfReader(packet).pages[0])
+            writer.add_page(page)
 
-    out = io.BytesIO()
-    writer.write(out)
-    out.seek(0)
-    return out
+        out = io.BytesIO()
+        writer.write(out)
+        out.seek(0)
+        return out
+    except Exception as e:
+        logger.error(f"PDF stamping failed: {e}")
+        raise
 
 
 def update_manifest(record: dict) -> None:
@@ -325,21 +361,27 @@ def update_manifest(record: dict) -> None:
     Capped at 1,000 entries to prevent unbounded growth.
     The manifest is the data source for the public ledger page.
     """
-    manifest_path = os.path.join(RECORDS_DIR, "manifest.json")
-    records: list = []
+    try:
+        manifest_path = os.path.join(RECORDS_DIR, "manifest.json")
+        records: list = []
 
-    if os.path.exists(manifest_path):
-        try:
-            with open(manifest_path, "r") as f:
-                records = json.load(f)
-        except Exception:
-            records = []  # recover gracefully from a corrupt manifest
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r") as f:
+                    records = json.load(f)
+            except Exception as e:
+                logger.warning(f"Could not read manifest (will overwrite): {e}")
+                records = []
 
-    records.insert(0, record)
-    records = records[:1000]
+        records.insert(0, record)
+        records = records[:1000]
 
-    with open(manifest_path, "w") as f:
-        json.dump(records, f, indent=4)
+        with open(manifest_path, "w") as f:
+            json.dump(records, f, indent=2)
+        logger.info(f"✅ Manifest updated: {len(records)} records")
+    except Exception as e:
+        logger.error(f"Manifest update failed: {e}")
+        raise
 
 
 def sync_to_github(json_path: str, record: dict) -> None:
@@ -352,40 +394,41 @@ def sync_to_github(json_path: str, record: dict) -> None:
     two documents are processed in rapid succession.
     """
     with git_lock:
-        update_manifest(record)
-
-        anchor_hash = os.path.basename(json_path).replace(".json", "")
-        git_env = os.environ.copy()
-        git_env["SSH_AUTH_SOCK"]   = SSH_AUTH_SOCK
-        git_env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no"
-
-        import subprocess
         try:
+            update_manifest(record)
+
+            anchor_hash = os.path.basename(json_path).replace(".json", "")
+            git_env = os.environ.copy()
+            git_env["SSH_AUTH_SOCK"]   = SSH_AUTH_SOCK
+            git_env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no"
+
             subprocess.run(
                 ['git', '-C', REPO_PATH, 'add', '.'],
-                check=True, env=git_env
+                check=True, env=git_env, capture_output=True
             )
             subprocess.run(
                 ['git', '-C', REPO_PATH, 'commit', '-m',
                  f"Audit: Anchor {anchor_hash}"],
-                check=False, env=git_env  # check=False: no-op if nothing changed
+                check=False, env=git_env, capture_output=True
             )
             subprocess.run(
                 ['git', '-C', REPO_PATH, 'fetch', 'origin'],
-                check=True, env=git_env
+                check=True, env=git_env, capture_output=True
             )
             subprocess.run(
                 ['git', '-C', REPO_PATH, 'pull', '--rebase',
                  '-X', 'ours', 'origin', 'main'],
-                check=True, env=git_env
+                check=True, env=git_env, capture_output=True
             )
             subprocess.run(
                 ['git', '-C', REPO_PATH, 'push', 'origin', 'main'],
-                check=True, env=git_env
+                check=True, env=git_env, capture_output=True
             )
-            print(f"✅ TruthChain synchronized: {anchor_hash}")
+            logger.info(f"✅ TruthChain synchronized: {anchor_hash}")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Git sync error: {e}")
+            logger.error(f"Git sync error: {e}")
+        except Exception as e:
+            logger.error(f"Sync thread error: {e}")
 
 
 def start_sync(json_path: str, record: dict) -> None:
@@ -401,7 +444,7 @@ def start_sync(json_path: str, record: dict) -> None:
     ).start()
 
 
-# ── 7. ROUTES ────────────────────────────────────────────────────
+# ── 7. ROUTES ──────────��─────────────────────────────────────────
 
 @app.route("/")
 def home():
@@ -438,7 +481,7 @@ def lock_engine():
     connection error instead of a clean confirmation.
     SIGINT → graceful_shutdown() → shell trap → RAM disk wiped.
     """
-    print("\n[!] LOCK SIGNAL RECEIVED — initiating secure shutdown...")
+    logger.warning("Lock signal received — initiating secure shutdown")
     threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
     return "Engine locked. RAM disk purged.", 200
 
@@ -449,7 +492,7 @@ def upload_pdf():
     Core route — the entire purpose of ORP Engine.
 
     Pipeline:
-      1. Validate the uploaded file (PDF only)
+      1. Validate the uploaded file (PDF only, size limit)
       2. Compute SHA-256 fingerprint
       3. Anchor hash to immudb (immutable, append-only) with retry logic
       4. Issue a unique control number (thread-safe + process-safe)
@@ -461,124 +504,114 @@ def upload_pdf():
     """
     global client
 
-    # ── Step 1: Validate ─────────────────────────────────────────
-    file = request.files.get("document")
-    if not file or not file.filename.lower().endswith('.pdf'):
-        return "Only PDF files are accepted.", 400
+    try:
+        # ── Step 1: Validate ─────────────────────────────────────────
+        file = request.files.get("document")
+        if not file or not file.filename.lower().endswith('.pdf'):
+            logger.warning(f"Invalid file type: {file.filename if file else 'None'}")
+            return "Only PDF files are accepted.", 400
 
-    doc_type  = request.form.get("doc_type", "BARANGAY-CERT")
-    pdf_bytes = file.read()
+        doc_type  = request.form.get("doc_type", "BARANGAY-CERT")
+        pdf_bytes = file.read()
 
-    # ── Step 2: Fingerprint ──────────────────────────────────────
-    # SHA-256 is one-way and deterministic — the same document always
-    # produces the same hash. Any modification, even a single space,
-    # produces a completely different hash.
-    sha256_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        if len(pdf_bytes) > MAX_PDF_SIZE:
+            logger.warning(f"File too large: {len(pdf_bytes)} bytes")
+            return "File exceeds maximum size (20MB).", 413
 
-    # ── Step 3: Anchor to immudb with RETRY LOGIC ─────────────────
-    # FIXED: Now handles transient failures gracefully with exponential backoff
-    tx = None
-    last_error = None
-    
-    for attempt in range(1, VAULT_MAX_RETRIES + 1):
-        try:
-            print(f"[*] Anchoring hash to vault (attempt {attempt}/{VAULT_MAX_RETRIES})...")
-            tx = client.set(sha256_hash.encode(), b"VERIFIED_BY_ORP_ENGINE")
-            print(f"[✔] Hash anchored: {sha256_hash}")
-            break
-        except Exception as e:
-            last_error = e
-            if attempt < VAULT_MAX_RETRIES:
-                print(f"[!] Vault error (attempt {attempt}): {e}")
-                print(f"    Retrying in {VAULT_RETRY_DELAY}s...")
-                time.sleep(VAULT_RETRY_DELAY)
-                
-                # Try to reconnect
-                try:
-                    print("[*] Reconnecting to vault...")
-                    client = get_client()
-                except Exception as reconnect_error:
-                    print(f"[!] Reconnection failed: {reconnect_error}")
-                    last_error = reconnect_error
-            else:
-                print(f"[✘] Vault unavailable after {VAULT_MAX_RETRIES} attempts")
+        # ── Step 2: Fingerprint ──────────────────────────────────────
+        sha256_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        logger.info(f"Processing document: {sha256_hash[:16]}...")
 
-    if tx is None:
-        # All retries exhausted
+        # ── Step 3: Anchor to immudb with RETRY LOGIC ─────────────────
+        tx = None
+        last_error = None
+        
+        for attempt in range(1, VAULT_MAX_RETRIES + 1):
+            try:
+                logger.info(f"Anchoring hash (attempt {attempt}/{VAULT_MAX_RETRIES})...")
+                tx = client.set(sha256_hash.encode(), b"VERIFIED_BY_ORP_ENGINE")
+                logger.info(f"✅ Hash anchored with tx_id={tx.id}")
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < VAULT_MAX_RETRIES:
+                    logger.warning(f"Vault error (attempt {attempt}): {e}")
+                    logger.info(f"Retrying in {VAULT_RETRY_DELAY}s...")
+                    time.sleep(VAULT_RETRY_DELAY)
+                    
+                    try:
+                        logger.info("Reconnecting to vault...")
+                        client = get_client()
+                    except Exception as reconnect_error:
+                        logger.warning(f"Reconnection failed: {reconnect_error}")
+                        last_error = reconnect_error
+                else:
+                    logger.error(f"Vault unavailable after {VAULT_MAX_RETRIES} attempts")
+
+        if tx is None:
+            logger.error(f"Failed to anchor: {last_error}")
+            return jsonify({
+                "status": "ERROR",
+                "message": f"Failed to anchor hash after {VAULT_MAX_RETRIES} attempts",
+                "error": str(last_error),
+                "sha256": sha256_hash
+            }), 503
+
+        # ── Step 4: Control number & timestamp ───────────────────────
+        local_tz     = pytz.timezone(TZ_NAME)
+        timestamp_ph = datetime.datetime.now(local_tz).strftime("%Y-%m-%d %I:%M %p PHT")
+        control_no   = next_control_number()
+        final_ctrl   = f"Verified_{control_no}-{doc_type}"
+
+        # ── Step 5: Assemble & sign the audit record ─────────────────
+        operator_identity = request.headers.get('X-Operator-ID', 'UNKNOWN')
+
+        record = {
+            "status":                "VERIFIED ✅",
+            "signer":                SIGNER_NAME,
+            "position":              f"{SIGNER_POS}, {LGU_NAME}",
+            "operator_identity":     operator_identity,
+            "document_type":         doc_type,
+            "control_number":        final_ctrl,
+            "sha256_hash":           sha256_hash,
+            "timestamp":             timestamp_ph,
+            "immudb_transaction_id": tx.id,
+            "verification_url":      f"{GITHUB_PORTAL}?hash={sha256_hash}",
+        }
+
+        pgp_sig = sign_json_data(record)
+        if pgp_sig:
+            record["data_signature"] = pgp_sig
+
+        # ── Step 6: Save JSON record locally ─────────────────────────
+        json_path = os.path.join(RECORDS_DIR, f"{sha256_hash}.json")
+        with open(json_path, "w") as f:
+            json.dump(record, f, indent=2)
+
+        # ── Step 7: Sync to GitHub (background) ──────────────────────
+        start_sync(json_path, record)
+
+        # ── Step 8: Stamp the PDF ────────────────────────────────────
+        qr_buf, _       = generate_qr(sha256_hash)
+        stamped_pdf_buf = add_footer(
+            pdf_bytes, sha256_hash, qr_buf, timestamp_ph, final_ctrl
+        )
+
+        # ── Step 9: Return stamped PDF to browser ────────────────────
+        logger.info(f"✅ Upload complete: {final_ctrl}")
+        return send_file(
+            stamped_pdf_buf,
+            as_attachment=True,
+            download_name=f"{final_ctrl}.pdf"
+        )
+
+    except Exception as e:
+        logger.error(f"Unhandled error in upload: {e}", exc_info=True)
         return jsonify({
             "status": "ERROR",
-            "message": f"Failed to anchor hash after {VAULT_MAX_RETRIES} attempts",
-            "error": str(last_error),
-            "sha256": sha256_hash
-        }), 503  # 503 Service Unavailable
-
-    # ── Step 4: Control number & timestamp ───────────────────────
-    local_tz     = pytz.timezone(TZ_NAME)
-    timestamp_ph = datetime.datetime.now(local_tz).strftime("%Y-%m-%d %I:%M %p PHT")
-    control_no   = next_control_number()
-    final_ctrl   = f"Verified_{control_no}-{doc_type}"
-
-    # ── Step 5: Assemble & sign the audit record ─────────────────
-    # X-Operator-ID is injected by Nginx from the mTLS client certificate DN.
-    # This permanently anchors the operator's identity to every issuance.
-    operator_identity = request.headers.get('X-Operator-ID', 'UNKNOWN')
-
-    record = {
-        "status":                "VERIFIED ✅",
-        "signer":                SIGNER_NAME,
-        "position":              f"{SIGNER_POS}, {LGU_NAME}",
-        "operator_identity":     operator_identity,
-        "document_type":         doc_type,
-        "control_number":        final_ctrl,
-        "sha256_hash":           sha256_hash,
-        "timestamp":             timestamp_ph,
-        "immudb_transaction_id": tx.id,
-        "verification_url":      f"{GITHUB_PORTAL}?hash={sha256_hash}",
-    }
-
-    pgp_sig = sign_json_data(record)
-    if pgp_sig:
-        record["data_signature"] = pgp_sig
-
-    # ── Step 6: Save JSON record locally ─────────────────────────
-    json_path = os.path.join(RECORDS_DIR, f"{sha256_hash}.json")
-    with open(json_path, "w") as f:
-        json.dump(record, f, indent=4)
-
-    # ── Step 7: Sync to GitHub (background) ──────────────────────
-    # Daemon thread — does not block the PDF response.
-    # The operator receives their stamped PDF immediately while
-    # the public ledger updates in the background (~60 seconds).
-    start_sync(json_path, record)
-
-    # ── Step 8: Stamp the PDF ────────────────────────────────────
-    qr_buf, _       = generate_qr(sha256_hash)
-    stamped_pdf_buf = add_footer(
-        pdf_bytes, sha256_hash, qr_buf, timestamp_ph, final_ctrl
-    )
-
-    # ── Step 9: Return stamped PDF to browser ────────────────────
-    # send_file returns binary — not HTML.
-    # portal.js receives this via fetch(), converts to a blob,
-    # creates a temporary URL, and triggers a file download.
-    return send_file(
-        stamped_pdf_buf,
-        as_attachment=True,
-        download_name=f"{final_ctrl}.pdf"
-    )
-
-
-# ── FUTURE: PhilID Sovereign Ingest ──────────────────────────────
-# Status:  PENDING — no implementation until policy justifies it
-# Reason:  Auto-generated barangay certificates require:
-#          - CSC or DILG policy on machine-generated official documents
-#          - Wet signature or digital signature step in the workflow
-#          - PSA API access agreement for PhilID data processing
-#          - Data Privacy Act 2012 compliance review (RA 10173)
-#
-# @app.route('/ingest', methods=['POST'])
-# def sovereign_ingest():
-#     ...
+            "message": "An unexpected error occurred",
+            "error": str(e)
+        }), 500
 
 
 # ── 8. ENTRY POINT ───────────────────────────────────────────────
@@ -586,4 +619,5 @@ if __name__ == "__main__":
     # Binds to 127.0.0.1 only — Nginx is the public-facing gateway.
     # Flask is never exposed directly to the network.
     port = int(os.getenv("FLASK_PORT", 5000))
-    app.run(host="127.0.0.1", port=port)
+    logger.info(f"Starting ORP Engine on 127.0.0.1:{port}")
+    app.run(host="127.0.0.1", port=port, debug=False)
