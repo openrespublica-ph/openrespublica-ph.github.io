@@ -1,9 +1,8 @@
-# main.py — ORP Engine · PDF Stamp & Anchor Service (IMPROVED v2)
+# main.py — ORP Engine · PDF Stamp & Anchor Service (IMPROVED v3)
 # Part of the OpenResPublica TruthChain stack.
 # Must be launched via run_orp.sh or run_orp-gum.sh — never directly.
 
 # ── IMPORTS ──────────────────────────────────────────────────────
-# Standard library — no installation needed, comes with Python.
 import hashlib      # SHA-256 fingerprinting
 import io           # in-memory byte streams (PDF processing)
 import os           # environment variables, file paths, signals
@@ -23,25 +22,24 @@ import qrcode       # QR code generation
 
 from flask import (
     Flask,
-    request,        # unpacks everything the browser sends (files, form data)
-    send_file,      # returns binary files (stamped PDF) to the browser
-    jsonify,        # returns JSON responses for errors
-    render_template # renders portal.html through Jinja2
+    request,
+    send_file,
+    jsonify,
+    render_template
 )
-from pypdf import PdfReader, PdfWriter          # read and write PDF pages
-from reportlab.pdfgen import canvas             # draw the stamp footer overlay
-from reportlab.lib.pagesizes import A4          # standard page dimensions
-from reportlab.lib.units import mm              # millimeter unit conversion
-from reportlab.lib.utils import ImageReader     # embed QR image into PDF
-from immudb.client import ImmudbClient          # immutable database client
-from dotenv import load_dotenv                  # loads .env into os.environ
-import getpass                                  # secure password prompt (no echo)
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from immudb.client import ImmudbClient
+from dotenv import load_dotenv
+import getpass
 
 # Load .env file into environment before reading any variables.
 load_dotenv()
 
 # ── LOGGING CONFIGURATION ────────────────────────────────────────
-# Structured logging with timestamps and severity levels
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -51,13 +49,9 @@ logger = logging.getLogger(__name__)
 
 
 # ── 1. SECURITY ENVIRONMENT VALIDATION ───────────────────────────
-# These three variables prove the engine was launched correctly
-# via the shell boot sequence (_orp_core.sh).
-# If any are missing, the engine halts immediately — no partial starts.
-
 GPG_HOME      = os.getenv("GNUPGHOME")
 GPG_EMAIL     = os.getenv("OPERATOR_GPG_EMAIL")
-SSH_AUTH_SOCK = os.getenv("SSH_AUTH_SOCK")  # proves the GPG agent is live
+SSH_AUTH_SOCK = os.getenv("SSH_AUTH_SOCK")
 
 if not all([GPG_HOME, GPG_EMAIL, SSH_AUTH_SOCK]):
     logger.critical("SECURITY FAILURE: Required environment variables missing")
@@ -66,22 +60,16 @@ if not all([GPG_HOME, GPG_EMAIL, SSH_AUTH_SOCK]):
     logger.critical(f"  - SSH_SOCK: {'✅' if SSH_AUTH_SOCK else '❌ MISSING'}")
     raise RuntimeError("Engine must be launched via run_orp.sh or run_orp-gum.sh")
 
-# GPG_HOME must live in RAM (/dev/shm) — never on disk.
-# If it's on disk, private keys survive a session, which is a vulnerability.
 if not GPG_HOME.startswith("/dev/shm/"):
     logger.critical("VULNERABILITY: GNUPGHOME must be in RAM (/dev/shm)")
     raise RuntimeError("Launch via the boot script with RAM-based keyring")
 
-# Initialize the GPG interface pointing at the ephemeral RAM keyring.
 gpg = gnupg.GPG(gnupghome=GPG_HOME)
 gpg.decode_errors = 'replace'
 logger.info(f"✅ GPG environment initialized in {GPG_HOME}")
 
 
 # ── 2. CONFIGURATION ─────────────────────────────────────────────
-# All values come from .env — nothing is hardcoded.
-# Defaults are safe fallbacks for development only.
-
 IMMUDB_HOST = os.getenv("IMMUDB_HOST", "127.0.0.1:3322")
 IMMUDB_USER = os.getenv("IMMUDB_USER", "immudb")
 IMMUDB_DB   = os.getenv("IMMUDB_DB",   "defaultdb")
@@ -94,51 +82,36 @@ TZ_NAME     = os.getenv("LGU_TIMEZONE",           "Asia/Manila")
 REPO_PATH     = os.getenv("GITHUB_REPO_PATH",  "/home/orp/openrespublica.github.io")
 GITHUB_PORTAL = os.getenv("GITHUB_PORTAL_URL", "https://openrespublica.github.io/verify.html")
 
-# Control number file — persists the last issued number across sessions.
 RECORDS_DIR  = os.path.join(REPO_PATH, "docs", "records")
 CONTROL_FILE = os.path.join(REPO_PATH, "docs", "control_number.txt")
 
-# Vault retry configuration
 VAULT_MAX_RETRIES = int(os.getenv("VAULT_MAX_RETRIES", "3"))
-VAULT_RETRY_DELAY = int(os.getenv("VAULT_RETRY_DELAY", "1"))  # seconds
-
-# File upload constraints
-MAX_PDF_SIZE = int(os.getenv("MAX_PDF_SIZE", "20 * 1024 * 1024"))  # 20MB
+VAULT_RETRY_DELAY = int(os.getenv("VAULT_RETRY_DELAY", "1"))
+MAX_PDF_SIZE = int(os.getenv("MAX_PDF_SIZE", "20 * 1024 * 1024"))
 
 
 # ── 3. FLASK INITIALIZATION ───────────────────────────────────────
-# static_folder='static' tells Flask to serve CSS, JS, and images
-# automatically from the /static directory — no @app.route needed.
 app = Flask(__name__,
             template_folder='templates',
             static_folder='static')
 
-# Threading primitives.
-# ctrl_lock — ensures only one thread can issue a control number at a time.
-# git_lock  — ensures only one thread pushes to GitHub at a time.
 ctrl_lock = threading.Lock()
 git_lock  = threading.Lock()
 
-# Ensure the records directory exists before anything tries to write to it.
 os.makedirs(RECORDS_DIR, exist_ok=True)
 logger.info(f"✅ Records directory ready: {RECORDS_DIR}")
 
 
 # ── 4. VAULT CONNECTION ───────────────────────────────────────────
-# Cached vault password — prompted exactly once at startup.
-# Reconnects (on session timeout) reuse this value silently,
-# so the web server never blocks waiting for terminal input.
 _vault_password: str | None = None
 
 def get_client() -> ImmudbClient:
     """
     Connect to the immudb vault with explicit host:port parsing.
-    Prompts for password on first call only — subsequent calls reuse
-    the cached value so reconnects never block the web server.
+    Prompts for password on first call only.
     """
     global _vault_password
 
-    # Split host:port explicitly — avoids gRPC defaulting to port 443.
     if ":" in IMMUDB_HOST:
         host, port = IMMUDB_HOST.rsplit(":", 1)
         try:
@@ -164,7 +137,6 @@ def get_client() -> ImmudbClient:
         logger.error(f"Vault access denied: {e}")
         raise
 
-# Connect once at startup — Flask routes reuse this global client.
 try:
     client = get_client()
 except Exception as e:
@@ -176,8 +148,7 @@ except Exception as e:
 def graceful_shutdown(signum, frame):
     """
     Called when SIGINT or SIGTERM is received.
-    Logs out of immudb, then forces exit so the shell trap in
-    run_orp.sh / run_orp-gum.sh fires the RAM disk cleanup.
+    Logs out of immudb, then forces exit.
     """
     logger.warning("Received shutdown signal — purging session...")
     try:
@@ -185,7 +156,7 @@ def graceful_shutdown(signum, frame):
         logger.info("✅ Vault session closed")
     except Exception as e:
         logger.warning(f"Vault logout error: {e}")
-    os._exit(0)  # os._exit bypasses Python cleanup to ensure shell trap fires
+    os._exit(0)
 
 signal.signal(signal.SIGINT,  graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)
@@ -194,11 +165,7 @@ signal.signal(signal.SIGTERM, graceful_shutdown)
 # ── 6. CRYPTO & DATA UTILITIES ───────────────────────────────────
 
 def sign_json_data(record: dict) -> dict | None:
-    """
-    Signs the audit record JSON using the ephemeral GPG key in RAM.
-    Returns the signature block to embed in the record, or None on failure.
-    The key never touches disk — it lives only in /dev/shm for this session.
-    """
+    """Signs the audit record JSON using the ephemeral GPG key in RAM."""
     try:
         data_str = json.dumps(record, sort_keys=True)
         sig      = gpg.sign(data_str, keyid=GPG_EMAIL)
@@ -218,32 +185,21 @@ def sign_json_data(record: dict) -> dict | None:
 
 
 def next_control_number() -> str:
-    """
-    Issues the next sequential control number for this calendar year.
-    
-    Uses both threading.Lock AND file locking for process safety.
-    The threading lock prevents race conditions between threads.
-    The fcntl file lock prevents race conditions between processes.
-    
-    Format: YYYY-NNNN  (e.g. 2026-0042)
-    """
+    """Issues the next sequential control number for this calendar year."""
     with ctrl_lock:
         local_tz     = pytz.timezone(TZ_NAME)
         current_year = str(datetime.datetime.now(local_tz).year)
 
-        # Create the control file atomically if this is the first issuance ever.
         if not os.path.exists(CONTROL_FILE):
             try:
                 fd = os.open(CONTROL_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 os.write(fd, b"2026-0000")
                 os.close(fd)
             except FileExistsError:
-                # Another process created it between our check and creation
                 pass
 
-        # Use file locking for process-level safety
         with open(CONTROL_FILE, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)  # Exclusive lock
+            fcntl.flock(f, fcntl.LOCK_EX)
             try:
                 content = f.read().strip()
                 if not content:
@@ -253,7 +209,6 @@ def next_control_number() -> str:
                     
                 year, num = parts[0], int(parts[1]) if len(parts) > 1 else 0
 
-                # Reset counter on new year.
                 if year != current_year:
                     year, num = current_year, 0
 
@@ -262,18 +217,14 @@ def next_control_number() -> str:
                 f.write(new_ctrl)
                 f.truncate()
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)  # Release lock
+                fcntl.flock(f, fcntl.LOCK_UN)
 
         logger.info(f"Control number issued: {new_ctrl}")
         return new_ctrl
 
 
 def generate_qr(sha256_hash: str) -> tuple[io.BytesIO, str]:
-    """
-    Generates a QR code that encodes the public verification URL
-    for this document. Scanning the QR opens the public ledger
-    pre-filtered to this exact document's hash.
-    """
+    """Generates a QR code linking to the public verification portal."""
     try:
         qr_url = f"{GITHUB_PORTAL}?hash={sha256_hash}"
         qr     = qrcode.QRCode(
@@ -301,15 +252,7 @@ def add_footer(
     timestamp:      str,
     control_number: str,
 ) -> io.BytesIO:
-    """
-    Stamps every page of the PDF with:
-      - A horizontal rule separating content from the stamp
-      - Timestamp, control number, and truncated hash
-      - QR code linking to the public verification portal
-
-    Uses ReportLab to draw on an overlay canvas, then merges
-    that overlay onto each page using pypdf.
-    """
+    """Stamps every page of the PDF with metadata footer and QR code."""
     try:
         reader   = PdfReader(io.BytesIO(original_pdf))
         writer   = PdfWriter()
@@ -319,11 +262,9 @@ def add_footer(
             packet = io.BytesIO()
             c      = canvas.Canvas(packet, pagesize=A4)
 
-            # Horizontal rule above the stamp area.
             c.setLineWidth(0.5)
             c.line(25 * mm, 22 * mm, 185 * mm, 22 * mm)
 
-            # Three metadata fields beneath the rule.
             items = [
                 ("TIMESTAMP", timestamp),
                 ("CTRL NO",   control_number),
@@ -337,12 +278,10 @@ def add_footer(
                 c.drawString(55 * mm, y, str(val))
                 y -= 3.5 * mm
 
-            # QR code in the bottom-right corner of the stamp area.
             c.drawImage(qr_image, 165 * mm, 5 * mm, width=15 * mm, height=15 * mm)
             c.save()
             packet.seek(0)
 
-            # Merge the stamp overlay onto the original page.
             page.merge_page(PdfReader(packet).pages[0])
             writer.add_page(page)
 
@@ -356,11 +295,7 @@ def add_footer(
 
 
 def update_manifest(record: dict) -> None:
-    """
-    Prepends the new record to manifest.json (newest first).
-    Capped at 1,000 entries to prevent unbounded growth.
-    The manifest is the data source for the public ledger page.
-    """
+    """Prepends the new record to manifest.json (newest first)."""
     try:
         manifest_path = os.path.join(RECORDS_DIR, "manifest.json")
         records: list = []
@@ -384,59 +319,117 @@ def update_manifest(record: dict) -> None:
         raise
 
 
+def run_git_command(cmd: list, description: str) -> bool:
+    """
+    Runs a git command with proper SSH environment.
+    
+    CRITICAL FIX: Uses SSH_AUTH_SOCK from environment to connect SSH agent.
+    This allows git to use the ephemeral SSH key stored in gpg-agent.
+    
+    Returns True on success, False on failure.
+    """
+    try:
+        git_env = os.environ.copy()
+        
+        # CRITICAL: Ensure SSH_AUTH_SOCK is set so git uses SSH agent
+        if not git_env.get("SSH_AUTH_SOCK"):
+            logger.error("SSH_AUTH_SOCK not in environment — SSH will fail")
+            return False
+        
+        # Configure SSH to use the gpg-agent socket
+        git_env["GIT_SSH_COMMAND"] = (
+            "ssh -o StrictHostKeyChecking=no "
+            "-o UserKnownHostsFile=/dev/null "
+            "-o IdentityFile=/dev/null "  # Don't use default keys
+            "-o IdentitiesOnly=yes "       # Use only SSH agent
+        )
+        
+        logger.debug(f"Git command: {' '.join(cmd)}")
+        logger.debug(f"SSH_AUTH_SOCK: {git_env.get('SSH_AUTH_SOCK')}")
+        
+        result = subprocess.run(
+            cmd,
+            check=True,
+            env=git_env,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        logger.info(f"✅ {description}")
+        if result.stdout:
+            logger.debug(f"stdout: {result.stdout[:200]}")
+        return True
+        
+    except subprocess.TimeoutExpired as e:
+        logger.error(f"❌ {description} — TIMEOUT: {e}")
+        return False
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ {description} — FAILED: {e.returncode}")
+        logger.error(f"stderr: {e.stderr[:500] if e.stderr else 'none'}")
+        logger.error(f"stdout: {e.stdout[:500] if e.stdout else 'none'}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ {description} — ERROR: {e}")
+        return False
+
+
 def sync_to_github(json_path: str, record: dict) -> None:
     """
     Runs in a background daemon thread.
     Writes the manifest, commits the new record JSON, and pushes
-    to GitHub Pages so the public ledger updates within ~60 seconds.
-
-    The git_lock ensures only one push happens at a time even if
-    two documents are processed in rapid succession.
+    to GitHub Pages using SSH (not HTTPS).
     """
     with git_lock:
         try:
             update_manifest(record)
-
             anchor_hash = os.path.basename(json_path).replace(".json", "")
-            git_env = os.environ.copy()
-            git_env["SSH_AUTH_SOCK"]   = SSH_AUTH_SOCK
-            git_env["GIT_SSH_COMMAND"] = "ssh -o StrictHostKeyChecking=no"
+            
+            logger.info(f"Starting git sync for {anchor_hash}...")
 
-            subprocess.run(
+            # Stage files
+            if not run_git_command(
                 ['git', '-C', REPO_PATH, 'add', '.'],
-                check=True, env=git_env, capture_output=True
-            )
-            subprocess.run(
-                ['git', '-C', REPO_PATH, 'commit', '-m',
-                 f"Audit: Anchor {anchor_hash}"],
-                check=False, env=git_env, capture_output=True
-            )
-            subprocess.run(
+                "Stage files"
+            ):
+                return
+
+            # Commit (may fail if nothing changed, that's OK)
+            if not run_git_command(
+                ['git', '-C', REPO_PATH, 'commit', '-m', f"Audit: Anchor {anchor_hash}"],
+                "Commit changes"
+            ):
+                logger.warning("Commit failed or nothing to commit (may be OK)")
+
+            # Fetch latest from remote
+            if not run_git_command(
                 ['git', '-C', REPO_PATH, 'fetch', 'origin'],
-                check=True, env=git_env, capture_output=True
-            )
-            subprocess.run(
-                ['git', '-C', REPO_PATH, 'pull', '--rebase',
-                 '-X', 'ours', 'origin', 'main'],
-                check=True, env=git_env, capture_output=True
-            )
-            subprocess.run(
+                "Fetch from remote"
+            ):
+                return
+
+            # Rebase local changes on top of remote
+            if not run_git_command(
+                ['git', '-C', REPO_PATH, 'pull', '--rebase', '-X', 'ours', 'origin', 'main'],
+                "Rebase onto remote main"
+            ):
+                return
+
+            # Push to remote
+            if not run_git_command(
                 ['git', '-C', REPO_PATH, 'push', 'origin', 'main'],
-                check=True, env=git_env, capture_output=True
-            )
+                "Push to remote"
+            ):
+                return
+            
             logger.info(f"✅ TruthChain synchronized: {anchor_hash}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git sync error: {e}")
+
         except Exception as e:
-            logger.error(f"Sync thread error: {e}")
+            logger.error(f"Sync thread error: {e}", exc_info=True)
 
 
 def start_sync(json_path: str, record: dict) -> None:
-    """
-    Launches sync_to_github in a daemon thread.
-    daemon=True means the thread will not block process exit —
-    the cleanup trap in the shell script fires cleanly.
-    """
+    """Launches sync_to_github in a daemon thread."""
     threading.Thread(
         target=sync_to_github,
         args=(json_path, record),
@@ -444,27 +437,17 @@ def start_sync(json_path: str, record: dict) -> None:
     ).start()
 
 
-# ── 7. ROUTES ──────────��─────────────────────────────────────────
+# ── 7. ROUTES ────────────────────────────────────────────────────
 
 @app.route("/")
 def home():
-    """
-    Serves the operator portal.
-    Jinja2 renders portal.html, resolving {{ url_for(...) }} into
-    real static file paths before sending HTML to the browser.
-    CSS and JS are then fetched automatically via Flask's built-in
-    static file handler — no additional routes needed.
-    """
+    """Serves the operator portal."""
     return render_template("portal.html")
 
 
 @app.route("/cert_error.html")
 def cert_error():
-    """
-    Fallback route for the Nginx error_page 495/496 directive.
-    In practice the named @cert_error location in orp_engine.conf
-    handles this inline — this route exists as a safety net only.
-    """
+    """Fallback route for Nginx error_page 495/496 directive."""
     return (
         "<h1>Sovereign Identity Required</h1>"
         "<p>A valid operator certificate is required.</p>",
@@ -474,13 +457,7 @@ def cert_error():
 
 @app.route('/lock_engine', methods=['POST'])
 def lock_engine():
-    """
-    Secure kill switch — triggered by the Lock Engine button in the portal.
-    Fires SIGINT after a 0.5s delay so Flask can send the 200 response
-    before the process exits. Without the delay, the browser gets a
-    connection error instead of a clean confirmation.
-    SIGINT → graceful_shutdown() → shell trap → RAM disk wiped.
-    """
+    """Secure kill switch — triggers graceful shutdown."""
     logger.warning("Lock signal received — initiating secure shutdown")
     threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
     return "Engine locked. RAM disk purged.", 200
@@ -489,18 +466,18 @@ def lock_engine():
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
     """
-    Core route — the entire purpose of ORP Engine.
-
+    Core route — PDF upload, hash, anchor, sign, stamp, publish.
+    
     Pipeline:
       1. Validate the uploaded file (PDF only, size limit)
       2. Compute SHA-256 fingerprint
-      3. Anchor hash to immudb (immutable, append-only) with retry logic
-      4. Issue a unique control number (thread-safe + process-safe)
+      3. Anchor hash to immudb with retry logic
+      4. Issue unique control number
       5. GPG-sign the audit record
-      6. Save the JSON record locally
+      6. Save JSON record locally
       7. Sync to GitHub Pages (background daemon thread)
       8. Stamp the PDF with QR + metadata footer
-      9. Return the stamped PDF to the browser for download
+      9. Return stamped PDF to browser for download
     """
     global client
 
@@ -616,8 +593,6 @@ def upload_pdf():
 
 # ── 8. ENTRY POINT ───────────────────────────────────────────────
 if __name__ == "__main__":
-    # Binds to 127.0.0.1 only — Nginx is the public-facing gateway.
-    # Flask is never exposed directly to the network.
     port = int(os.getenv("FLASK_PORT", 5000))
     logger.info(f"Starting ORP Engine on 127.0.0.1:{port}")
     app.run(host="127.0.0.1", port=port, debug=False)
