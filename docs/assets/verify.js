@@ -1,215 +1,57 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verify Document | OpenResPublica</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=IBM+Plex+Mono:wght@400;600&family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet">
-    <style>
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        :root {
-            --navy: #002147; --navy-deep: #001530; --navy-mid: #003366;
-            --gold: #C9A84C; --white: #FAFAF7; --ink: #1A1A2E; --muted: #6B7280;
-            --border: rgba(0,33,71,0.1); --success: #059669; --error: #DC2626;
-            --font-serif: 'Playfair Display', Georgia, serif;
-            --font-sans: 'Source Sans 3', system-ui, sans-serif;
-            --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
-        }
+document.addEventListener('DOMContentLoaded', () => {
+    const params = new URLSearchParams(window.location.search);
+    const hash = params.get('hash');
+    const btn = document.getElementById('verifyBtn');
 
-        body {
-            background: var(--white); color: var(--ink);
-            font-family: var(--font-sans); min-height: 100vh;
-            display: flex; flex-direction: column;
-        }
+    if (hash) {
+        document.getElementById('hashInput').value = hash;
+        checkHash(hash);
+    }
 
-        /* Header (Imported from your records.html style) */
-        .site-header { background: var(--navy-deep); border-bottom: 3px solid var(--gold); position: relative; overflow: hidden; }
-        .header-inner { max-width: 800px; margin: 0 auto; padding: 2.5rem 1.5rem 2rem; text-align: center; }
-        .republic-label { font-size: 0.7rem; font-weight: 600; letter-spacing: 0.25em; text-transform: uppercase; color: var(--gold); margin-bottom: 0.5rem; }
-        .site-header h1 { font-family: var(--font-serif); font-size: clamp(1.6rem, 4vw, 2.4rem); font-weight: 700; color: var(--white); line-height: 1.2; margin-bottom: 0.4rem; }
+    btn.addEventListener('click', () => checkHash());
+});
+
+async function checkHash(inputHash, retryCount = 0) {
+    const hash = (inputHash || document.getElementById('hashInput').value).trim();
+    if (!hash) return;
+
+    const vBox = document.getElementById('verifiedBox');
+    const eBox = document.getElementById('errorBox');
+    const load = document.getElementById('loading');
+    const details = document.getElementById('details');
+    
+    vBox.style.display = 'none'; 
+    eBox.style.display = 'none'; 
+    load.style.display = 'block';
+
+    try {
+        // Cache-buster ensures we don't see old data
+        const response = await fetch(`records/${hash}.json?t=${Date.now()}`);
         
-        main { flex: 1; max-width: 700px; margin: 0 auto; width: 100%; padding: 3rem 1.5rem; }
-
-        /* Verification Card */
-        .verify-card {
-            background: #fff; border: 1px solid var(--border);
-            border-radius: 12px; box-shadow: 0 10px 30px rgba(0,33,71,0.08);
-            overflow: hidden; text-align: center; position: relative;
-        }
+        if (!response.ok) throw new Error("Not found");
         
-        .status-banner { padding: 1.5rem; font-weight: 700; font-size: 1.2rem; letter-spacing: 0.05em; color: #fff; }
-        .status-verified { background: var(--success); }
-        .status-pending { background: var(--navy-mid); }
-        .status-error { background: var(--error); }
-
-        .card-body { padding: 2rem; text-align: left; }
+        const data = await response.json();
         
-        .section-title { font-family: var(--font-serif); font-size: 1.1rem; color: var(--navy-mid); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1rem; margin-top: 1.5rem;}
-        .section-title:first-child { margin-top: 0; }
-
-        .data-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
-        @media (min-width: 500px) { .data-grid { grid-template-columns: 1fr 1fr; } }
+        details.innerHTML = `
+            <hr>
+            <strong>Signer:</strong> ${data.signer}<br>
+            <strong>Position:</strong> ${data.position}<br>
+            <strong>Control No:</strong> ${data.control_number}<br>
+            <strong>Timestamp:</strong> ${data.timestamp}<br>
+            <strong>immudb Tx:</strong> <mark>#${data.immudb_transaction_id}</mark><br>
+            <strong>Fingerprint:</strong> <code>${data.sha256_hash}</code>
+        `;
         
-        .data-item { display: flex; flex-direction: column; gap: 0.25rem; }
-        .data-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
-        .data-value { font-size: 0.95rem; color: var(--ink); font-weight: 500; word-break: break-word; }
-        .data-mono { font-family: var(--font-mono); font-size: 0.8rem; background: rgba(0,0,0,0.03); padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); }
-
-        .badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; background: rgba(0,33,71,0.07); color: var(--navy-mid); }
-
-        .crypto-proofs { background: #f8f9fa; padding: 1.5rem; border-radius: 8px; margin-top: 2rem; border: 1px dashed var(--border); }
-        .crypto-item { display: flex; align-items: flex-start; gap: 0.75rem; margin-bottom: 1rem; }
-        .crypto-item:last-child { margin-bottom: 0; }
-        .crypto-icon { font-size: 1.2rem; }
-        .crypto-text { flex: 1; }
-        .crypto-text strong { display: block; font-size: 0.85rem; color: var(--navy-deep); }
-        .crypto-text span { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); word-break: break-all; }
-
-        /* Loader */
-        .spinner { width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1rem; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        
-        .footer-nav { margin-top: 2rem; display: flex; justify-content: center; gap: 1rem; }
-        .footer-nav a { font-size: 0.85rem; color: var(--navy-mid); text-decoration: none; font-weight: 600; }
-        .footer-nav a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-
-    <header class="site-header">
-        <div class="header-inner">
-            <p class="republic-label">Republic of the Philippines</p>
-            <h1>Verification Portal</h1>
-        </div>
-    </header>
-
-    <main>
-        <div class="verify-card" id="card-container">
-            <div class="status-banner status-pending">
-                <div class="spinner"></div>
-                Searching Immutable Ledger...
-            </div>
-        </div>
-
-        <nav class="footer-nav">
-            <a href="records.html">← View Public Ledger</a>
-        </nav>
-    </main>
-
-    <script>
-        const params = new URLSearchParams(window.location.search);
-        const fileHash = params.get('hash');
-        const container = document.getElementById('card-container');
-
-        if (!fileHash) {
-            showError("No Document Hash Provided", "Please scan a valid ORP QR code.");
+        vBox.style.display = 'block';
+    } catch (e) {
+        if (retryCount < 1) {
+            load.innerHTML = "<ins>⏳ Node propagation lag... retrying in 10s</ins>";
+            setTimeout(() => checkHash(hash, retryCount + 1), 10000);
         } else {
-            // Append timestamp to prevent aggressive browser caching of the JSON
-            fetch(`records/${fileHash}.json?t=${Date.now()}`)
-                .then(response => {
-                    if (!response.ok) throw new Error("Record not found");
-                    return response.json();
-                })
-                .then(data => renderSuccess(data))
-                .catch(err => {
-                    showError(
-                        "Verification Pending or Not Found", 
-                        "If this document was just issued, please wait 60 seconds for the Git ledger to synchronize and refresh the page."
-                    );
-                });
+            document.getElementById('errorHash').innerText = hash;
+            eBox.style.display = 'block';
         }
-
-        function renderSuccess(data) {
-            // Check if PhilID data exists
-            const philIdSection = data.philid_pcn ? `
-                <h3 class="section-title">Verified Subject</h3>
-                <div class="data-grid">
-                    <div class="data-item">
-                        <span class="data-label">PhilSys PCN</span>
-                        <span class="data-value">${data.philid_pcn.replace(/.(?=.{4})/g, '*')}</span>
-                    </div>
-                    <div class="data-item">
-                        <span class="data-label">Subject Hash</span>
-                        <span class="data-value data-mono" style="font-size: 0.65rem;">${data.philid_hash}</span>
-                    </div>
-                </div>
-            ` : '';
-
-            // Extract the GPG signature status from the audit record.
-            // hardware_seal (ESP32) is a Phase 2 feature — not written by main.py yet.
-            // Showing "N/A..." for a field that never exists is misleading; removed.
-            const gpgSig = data.data_signature?.gpg_signature ? "Valid OpenPGP Signature" : "N/A";
-
-            container.innerHTML = `
-                <div class="status-banner status-verified">
-                    ✅ AUTHENTIC DOCUMENT
-                </div>
-                <div class="card-body">
-                    <h3 class="section-title">Document Details</h3>
-                    <div class="data-grid">
-                        <div class="data-item">
-                            <span class="data-label">Control Number</span>
-                            <span class="data-value" style="font-weight: 700; color: var(--navy-mid);">${data.control_number || '—'}</span>
-                        </div>
-                        <div class="data-item">
-                            <span class="data-label">Document Type</span>
-                            <span class="data-value"><span class="badge">${data.document_type || 'GENERAL'}</span></span>
-                        </div>
-                        <div class="data-item">
-                            <span class="data-label">Date Issued</span>
-                            <span class="data-value">${data.timestamp || '—'}</span>
-                        </div>
-                        <div class="data-item">
-                            <span class="data-label">Authorized Signatory</span>
-                            <span class="data-value">${data.signer || '—'}<br><small style="color: var(--muted);">${data.position || ''}</small></span>
-                        </div>
-                    </div>
-
-                    ${philIdSection}
-
-                    <div class="crypto-proofs">
-                        <h3 class="section-title" style="margin-top: 0;">TruthChain Proofs</h3>
-                        
-                        <div class="crypto-item">
-                            <div class="crypto-icon">🔗</div>
-                            <div class="crypto-text">
-                                <strong>Document Hash (SHA-256)</strong>
-                                <span>${data.sha256_hash || '—'}</span>
-                            </div>
-                        </div>
-
-                        <div class="crypto-item">
-                            <div class="crypto-icon">🗄️</div>
-                            <div class="crypto-text">
-                                <strong>immudb Transaction ID</strong>
-                                <span>TxID: ${data.immudb_transaction_id || 'Anchored'}</span>
-                            </div>
-                        </div>
-                        
-                        <div class="crypto-item">
-                            <div class="crypto-icon">✍️</div>
-                            <div class="crypto-text">
-                                <strong>Operator Identity</strong>
-                                <span>${gpgSig}</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        function showError(title, message) {
-            container.innerHTML = `
-                <div class="status-banner status-error">
-                    ⚠️ ${title}
-                </div>
-                <div class="card-body" style="text-align: center; padding: 3rem 2rem;">
-                    <p style="color: var(--muted); margin-bottom: 1rem;">${message}</p>
-                    <button onclick="window.location.reload()" style="padding: 10px 20px; background: var(--navy-mid); color: white; border: none; border-radius: 6px; cursor: pointer; font-family: var(--font-sans);">Refresh Page</button>
-                </div>
-            `;
-        }
-    </script>
-</body>
-</html>
+    } finally {
+        load.style.display = 'none';
+    }
+}
