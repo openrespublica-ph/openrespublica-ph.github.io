@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# python_prep.sh — Secure Python Virtual Environment Setup (auto-add pip/setuptools/wheel)
+# python_prep.sh — Secure Python Virtual Environment Setup
+# ─────────────────────────────────────────────────────────────────
+# Creates a venv, installs system dependencies (libmagic1), compiles
+# a hash-pinned requirements.txt via pip-compile, installs all
+# packages with strict security flags, and runs pip-audit.
+#
+# Idempotent — safe to re-run on an existing venv.
+# ─────────────────────────────────────────────────────────────────
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,122 +17,191 @@ REQ_FILE="$SCRIPT_DIR/requirements.txt"
 CA_CERT="/etc/ssl/certs/ca-certificates.crt"
 PIP_LOG="$SCRIPT_DIR/pip-secure.log"
 
-GREEN='\033[0;32m'; CYAN='\033[0;36m'; GOLD='\033[0;33m'
-BOLD='\033[1m'; NC='\033[0m'
-ok(){ printf "${GREEN}[✔]${NC} %s\n" "$1"; }
-info(){ printf "${CYAN}[*]${NC} %s\n" "$1"; }
-warn(){ printf "${GOLD}[!]${NC} %s\n" "$1"; }
-die(){ printf "\033[0;31m[✘] ERROR: %s${NC}\n" "$1" >&2; exit 1; }
+# ── Colours ───────────────────────────────────────────────────────
+GREEN='\033[0;32m'; CYAN='\033[0;36m'; GOLD='\033[0;33m'; RED='\033[0;31m'
+BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
-info "Checking Python installation..."
-command -v python3 >/dev/null 2>&1 || die "python3 not found. Install python3."
-PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
-if [[ "$PYTHON_VERSION" < "3.10" ]]; then
-  die "Python 3.10+ required. Found $PYTHON_VERSION"
+ok()      { printf "${GREEN}[✔]${NC} %s\n" "$1"; }
+info()    { printf "${CYAN}[*]${NC} %s\n" "$1"; }
+warn()    { printf "${GOLD}[!]${NC} %s\n" "$1"; }
+die()     { printf "${RED}[✘] ERROR: %s${NC}\n" "$1" >&2; exit 1; }
+section() { printf "\n${BOLD}${CYAN}━━━ %s ━━━${NC}\n\n" "$1"; }
+
+# ── Banner ────────────────────────────────────────────────────────
+clear
+printf "${BOLD}${CYAN}"
+cat <<'BANNER'
+  ╔══════════════════════════════════════════════════════════╗
+  ║     ORP ENGINE — Python Environment Setup               ║
+  ╚══════════════════════════════════════════════════════════╝
+BANNER
+printf "${NC}\n"
+
+# ── 1. Python version check ───────────────────────────────────────
+section "1. Python"
+
+command -v python3 >/dev/null 2>&1 || die "python3 not found. Install with: sudo apt-get install python3"
+
+PYTHON_VERSION="$(python3 --version 2>&1 | awk '{print $2}')"
+PY_MAJOR="$(echo "$PYTHON_VERSION" | cut -d. -f1)"
+PY_MINOR="$(echo "$PYTHON_VERSION" | cut -d. -f2)"
+
+if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]); then
+    die "Python 3.10+ required. Found: $PYTHON_VERSION"
 fi
-ok "Python $PYTHON_VERSION available"
-
-[ -f "$REQ_IN" ] || die "requirements.in not found at $REQ_IN. Create it with your top-level pins."
-
-[ -f "$CA_CERT" ] || die "CA certificate bundle not found at $CA_CERT"
-ok "CA certificate bundle found"
+ok "Python $PYTHON_VERSION"
 
 if ! python3 -m venv --help >/dev/null 2>&1; then
-  die "python3-venv not installed. Install with: sudo apt-get install python3-venv"
+    die "python3-venv not installed. Install with: sudo apt-get install python3-venv"
 fi
 ok "venv module available"
 
-if [ -d "$VENV_DIR" ]; then
-  warn "Virtual environment already exists at $VENV_DIR"
+# ── 2. System dependencies ────────────────────────────────────────
+# python-magic requires libmagic1 at the OS level. Without it,
+# `import magic` raises: ImportError: failed to find libmagic
+section "2. System Dependencies"
+
+SYSTEM_PKGS=()
+dpkg -l libmagic1 >/dev/null 2>&1 || SYSTEM_PKGS+=("libmagic1")
+
+if [ ${#SYSTEM_PKGS[@]} -gt 0 ]; then
+    info "Installing missing system packages: ${SYSTEM_PKGS[*]}"
+    sudo apt-get update -qq
+    sudo apt-get install -y "${SYSTEM_PKGS[@]}"
+    ok "System packages installed: ${SYSTEM_PKGS[*]}"
 else
-  info "Creating virtual environment..."
-  python3 -m venv "$VENV_DIR"
-  ok "Virtual environment created"
+    ok "All system dependencies present (libmagic1 ✔)."
 fi
 
-# Activate
+[ -f "$CA_CERT" ] || die "CA certificate bundle not found: $CA_CERT"
+ok "CA certificate bundle found."
+
+# ── 3. requirements.in pre-flight ────────────────────────────────
+section "3. Requirements"
+
+[ -f "$REQ_IN" ] || die "requirements.in not found at $REQ_IN"
+ok "requirements.in found."
+
+# ── 4. Virtual environment ────────────────────────────────────────
+section "4. Virtual Environment"
+
+if [ -d "$VENV_DIR" ]; then
+    warn "Virtual environment already exists at $VENV_DIR"
+else
+    info "Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    ok "Virtual environment created."
+fi
+
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
 
-info "Upgrading pip, setuptools, wheel in venv..."
-python3 -m pip install --upgrade pip setuptools wheel >/dev/null
-ok "pip, setuptools, wheel upgraded in venv"
+info "Upgrading pip, setuptools, wheel..."
+python3 -m pip install --quiet --upgrade pip setuptools wheel
+ok "pip, setuptools, wheel upgraded."
 
-info "Installing pip-tools (for pip-compile)..."
-python3 -m pip install --upgrade pip-tools >/dev/null
-ok "pip-tools installed"
+# ── 5. Ensure bootstrap pins are in requirements.in ───────────────
+# Pre-seed pip/setuptools/wheel pins so requirements.in is fully
+# self-contained in git and pip-compile produces stable output.
+section "5. Bootstrap Pin Check"
 
-# Ensure pip/setuptools/wheel are pinned in requirements.in
-MISSING=()
+MISSING_PINS=()
 for PKG in pip setuptools wheel; do
-  if ! grep -Eiq "^${PKG}==" "$REQ_IN"; then
-    MISSING+=("$PKG")
-  fi
+    grep -Eiq "^${PKG}==" "$REQ_IN" || MISSING_PINS+=("$PKG")
 done
 
-if [ ${#MISSING[@]} -gt 0 ]; then
-  info "Auto-adding missing pins for: ${MISSING[*]}"
-  # get current versions from the venv
-  PIP_VER=$(python3 -m pip --version 2>/dev/null | awk '{print $2}')
-  # setuptools and wheel via python import
-  read -r SETUPTOOLS_VER WHEEL_VER < <(python3 - <<'PY'
+if [ ${#MISSING_PINS[@]} -gt 0 ]; then
+    info "Auto-pinning in requirements.in: ${MISSING_PINS[*]}"
+
+    PIP_VER="$(python3 -m pip --version | awk '{print $2}')"
+    read -r SETUPTOOLS_VER WHEEL_VER < <(python3 - <<'PY'
 import setuptools, wheel
 print(setuptools.__version__, wheel.__version__)
 PY
 )
-  # create a temp file and preserve original comments
-  TMP="/tmp/req_in.$$"
-  cp "$REQ_IN" "$TMP"
-  for PKG in "${MISSING[@]}"; do
-    case "$PKG" in
-      pip) printf "\n# pinned by python_prep.sh\npip==%s\n" "$PIP_VER" >> "$TMP" ;;
-      setuptools) printf "setuptools==%s\n" "$SETUPTOOLS_VER" >> "$TMP" ;;
-      wheel) printf "wheel==%s\n" "$WHEEL_VER" >> "$TMP" ;;
-    esac
-  done
-  mv "$TMP" "$REQ_IN"
-  ok "Added pins for: ${MISSING[*]} to requirements.in"
+    TMP="$(mktemp)"
+    cp "$REQ_IN" "$TMP"
+
+    {
+        printf '\n# ── Bootstrap (auto-pinned by python_prep.sh) ──────────────────\n'
+        for PKG in "${MISSING_PINS[@]}"; do
+            case "$PKG" in
+                pip)        printf 'pip==%s\n'        "$PIP_VER" ;;
+                setuptools) printf 'setuptools==%s\n' "$SETUPTOOLS_VER" ;;
+                wheel)      printf 'wheel==%s\n'      "$WHEEL_VER" ;;
+            esac
+        done
+    } >> "$TMP"
+
+    mv "$TMP" "$REQ_IN"
+    ok "Pins added to requirements.in: ${MISSING_PINS[*]}"
 else
-  ok "pip, setuptools, wheel already pinned in requirements.in"
+    ok "Bootstrap pins already present in requirements.in."
 fi
 
-info "Regenerating hashed requirements.txt from requirements.in..."
-# Always call the pip-compile binary inside the venv, not the module
-"$VENV_DIR/bin/pip-compile" --generate-hashes "$REQ_IN" --output-file "$REQ_FILE"
+# ── 6. Install pip-tools ─────────────────────────────────────────
+section "6. pip-tools"
 
-# Verify file exists and is non-empty
-if [ ! -s "$REQ_FILE" ]; then
-  die "requirements.txt was not created at $REQ_FILE. Check pip-compile output."
-fi
-ok "requirements.txt regenerated with hashes at $REQ_FILE"
+info "Installing pip-tools..."
+python3 -m pip install --quiet --upgrade pip-tools
+ok "pip-tools installed."
 
-python3 -m piptools.scripts.compile --generate-hashes --output-file "$REQ_FILE" "$REQ_IN"
-ok "requirements.txt regenerated with hashes"
+# ── 7. Compile locked requirements.txt ───────────────────────────
+# FIXED: pip-compile is called exactly ONCE using the venv binary.
+# The previous version called it twice (once via venv binary, once
+# via python3 -m piptools.scripts.compile), silently overwriting
+# the first output. The module entrypoint is not a supported API.
+section "7. Compiling requirements.txt"
 
-info "Installing dependencies with strict security flags..."
+info "Running pip-compile --generate-hashes..."
+"$VENV_DIR/bin/pip-compile" \
+    --generate-hashes \
+    --quiet \
+    "$REQ_IN" \
+    --output-file "$REQ_FILE"
+
+[ -s "$REQ_FILE" ] || die "requirements.txt was not created at $REQ_FILE"
+ok "requirements.txt compiled with hashes."
+
+# ── 8. Secure installation ────────────────────────────────────────
+section "8. Installing Dependencies"
+
+info "Installing packages with strict security flags..."
 pip install \
-  --require-virtualenv \
-  --isolated \
-  --no-cache-dir \
-  --require-hashes \
-  -r "$REQ_FILE" \
-  --cert "$CA_CERT" \
-  --retries 3 \
-  --timeout 10 \
-  --no-input \
-  --log "$PIP_LOG"
+    --require-virtualenv \
+    --isolated \
+    --no-cache-dir \
+    --require-hashes \
+    -r "$REQ_FILE" \
+    --cert "$CA_CERT" \
+    --retries 3 \
+    --timeout 10 \
+    --no-input \
+    --log "$PIP_LOG"
 
-ok "Dependencies installed securely"
+ok "Dependencies installed."
 
-info "Running pip-audit..."
-if ! python3 -m pip_audit.cli >/dev/null 2>&1; then
-  warn "pip-audit found issues. Run 'pip-audit' locally to inspect."
+# ── 9. pip-audit ──────────────────────────────────────────────────
+section "9. Security Audit"
+
+if python3 -m pip_audit --progress-spinner off 2>/dev/null; then
+    ok "pip-audit passed — no known vulnerabilities."
 else
-  ok "pip-audit passed (no known vulnerabilities found)"
+    warn "pip-audit found issues. Run 'pip-audit' to inspect."
+    warn "Check $PIP_LOG for details."
 fi
 
-info "Saving environment snapshot to requirements.lock..."
-python3 -m pip freeze > "$SCRIPT_DIR/requirements.lock"
-ok "requirements.lock written"
+# ── 10. Lock snapshot ─────────────────────────────────────────────
+section "10. Lockfile"
 
-printf "\n${BOLD:-}${CYAN:-}━━━ Setup Complete ━━━${NC:-}\n"
+python3 -m pip freeze > "$SCRIPT_DIR/requirements.lock"
+ok "requirements.lock written."
+
+# ── Summary ───────────────────────────────────────────────────────
+printf "\n${BOLD}${CYAN}━━━ Python Environment Ready ━━━${NC}\n\n"
+printf "  ${BOLD}%-20s${NC} %s\n" "Python:" "$PYTHON_VERSION"
+printf "  ${BOLD}%-20s${NC} %s\n" "Venv:" "$VENV_DIR"
+printf "  ${BOLD}%-20s${NC} %s\n" "Lockfile:" "requirements.lock"
+printf "  ${BOLD}%-20s${NC} %s\n" "Pip log:" "$PIP_LOG"
+printf "\n"
+ok "Setup complete."
